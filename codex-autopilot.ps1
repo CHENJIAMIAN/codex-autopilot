@@ -17,7 +17,7 @@ $ErrorActionPreference = "Stop"
 
 $script:Ui = ConvertFrom-Json @'
 {
-  "ResumePrompt": "\u5148\u7528\u4e0a\u5e1d\u89c6\u89d2\u770b\u770b\uff0c\u518d\u7ee7\u7eed\u63a8\u8fdb\uff0c\u8981\u9ad8\u6548\u5229\u7528\u5b50\u4ee3\u7406\u52a0\u901f\u63a8\u8fdb\u901f\u5ea6",
+  "ResumePrompt": "1.\u5148\u7528\u4e0a\u5e1d\u89c6\u89d2\u770b\u5f53\u524d\u72b6\u6001\u8ddd\u79bb\u539f\u59cb\u76ee\u6807\u591a\u8fdc 2.\u63d0\u4ea4\u6240\u6709\u66f4\u6539\u4f5c\u4e3a\u65b0\u5f81\u7a0b\u7684\u57fa\u7ebf 3.\u7ee7\u7eed\u6cbf\u7740\u539f\u59cb\u76ee\u6807\u63a8\u8fdb,\u8981\u9ad8\u6548\u5229\u7528\u5b50\u4ee3\u7406\u52a0\u901f\u63a8\u8fdb\u901f\u5ea6",
   "NoSessionsFound": "\u672a\u627e\u5230 Codex \u4f1a\u8bdd\u3002",
   "NoSessionSelected": "\u672a\u9009\u62e9\u4efb\u4f55\u4f1a\u8bdd\u3002",
   "SelectSessionPrompt": "\u9009\u62e9\u4f1a\u8bdd: ",
@@ -64,6 +64,18 @@ function New-SharedUtf8Reader {
     return New-Object System.IO.StreamReader($fileStream, $script:Utf8Encoding, $true)
 }
 
+function Read-TextFileUtf8 {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $reader = New-SharedUtf8Reader -Path $Path
+    try {
+        return $reader.ReadToEnd()
+    }
+    finally {
+        $reader.Dispose()
+    }
+}
+
 function Test-TaskCompletionSignal {
     param(
         [AllowEmptyString()][string]$Message,
@@ -86,6 +98,122 @@ function Test-TaskCompletionSignal {
     return $false
 }
 
+function Get-TurnBanner {
+    param(
+        [Parameter(Mandatory = $true)][int]$Turn,
+        [Parameter(Mandatory = $true)][int]$MaxTurns,
+        [ValidateSet("Begin", "End")][string]$Phase = "Begin"
+    )
+    $label = if ($Phase -eq "End") { [string]::Concat([char]0x7ED3, [char]0x675F) } else { [string]::Concat([char]0x5F00, [char]0x59CB) }
+    return ("========== Turn {0} / {1} {2} ==========" -f $Turn, $MaxTurns, $label)
+}
+
+function Get-WindowTitle {
+    param(
+        [ValidateSet("Idle", "Running", "Completed", "Failed")][string]$Phase = "Idle",
+        [int]$Turn,
+        [int]$MaxTurns,
+        [int]$ExitCode
+    )
+
+    switch ($Phase) {
+        "Running" {
+            return ("codex-autopilot | Turn {0}/{1}" -f $Turn, $MaxTurns)
+        }
+        "Completed" {
+            return ("codex-autopilot | {0}" -f ([string]::Concat([char]0x5DF2, [char]0x5B8C, [char]0x6210)))
+        }
+        "Failed" {
+            return ("codex-autopilot | {0}({1})" -f ([string]::Concat([char]0x5931, [char]0x8D25)), $ExitCode)
+        }
+        default {
+            return "codex-autopilot"
+        }
+    }
+}
+
+function Set-WindowTitle {
+    param([Parameter(Mandatory = $true)][string]$Title)
+
+    try {
+        $host.UI.RawUI.WindowTitle = $Title
+    }
+    catch {}
+}
+
+function Start-WindowTitleKeeper {
+    param(
+        [AllowEmptyString()][string]$Title,
+        [int]$IntervalMilliseconds = 500
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Title)) {
+        return $null
+    }
+
+    if (-not ("CodexAutopilot.WindowTitleKeeper" -as [type])) {
+        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace CodexAutopilot {
+    public sealed class WindowTitleKeeper : IDisposable {
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+        private static extern bool SetConsoleTitle(string lpConsoleTitle);
+
+        private readonly CancellationTokenSource _cancellation = new CancellationTokenSource();
+        private readonly Task _task;
+
+        public WindowTitleKeeper(string title, int intervalMilliseconds) {
+            _task = Task.Run(() => {
+                while (!_cancellation.IsCancellationRequested) {
+                    try {
+                        SetConsoleTitle(title);
+                    }
+                    catch {
+                    }
+
+                    try {
+                        Task.Delay(intervalMilliseconds, _cancellation.Token).Wait();
+                    }
+                    catch {
+                    }
+                }
+            }, _cancellation.Token);
+        }
+
+        public void Dispose() {
+            _cancellation.Cancel();
+            try {
+                _task.Wait(200);
+            }
+            catch {
+            }
+            _cancellation.Dispose();
+        }
+    }
+}
+"@
+    }
+
+    return [CodexAutopilot.WindowTitleKeeper]::new($Title, $IntervalMilliseconds)
+}
+
+function Stop-WindowTitleKeeper {
+    param($Keeper)
+
+    if ($null -eq $Keeper) {
+        return
+    }
+
+    try {
+        $Keeper.Dispose()
+    }
+    catch {}
+}
+
 function Get-CodexExecArgumentList {
     param(
         [Parameter(Mandatory = $true)][string]$LastMessageFile,
@@ -106,6 +234,33 @@ function Get-CodexExecArgumentList {
         "-o",
         $LastMessageFile
     ) + $resumeArgs
+}
+
+function Invoke-CodexCommand {
+    param(
+        [Parameter(Mandatory = $true)][string[]]$ArgumentList,
+        [string]$WindowTitle
+    )
+
+    $keeper = if ([string]::IsNullOrWhiteSpace($WindowTitle)) {
+        $null
+    }
+    else {
+        Start-WindowTitleKeeper -Title $WindowTitle
+    }
+    try {
+        Invoke-CodexExecutable -ArgumentList $ArgumentList | Out-Host
+        return [int]$LASTEXITCODE
+    }
+    finally {
+        Stop-WindowTitleKeeper -Keeper $keeper
+    }
+}
+
+function Invoke-CodexExecutable {
+    param([Parameter(Mandatory = $true)][string[]]$ArgumentList)
+
+    & codex @ArgumentList
 }
 
 function Get-SessionIdFromRolloutPath {
@@ -294,10 +449,10 @@ function Get-CodexSessionEntries {
         $payload = Get-SessionMetaPayloadFromRollout -Path $file.FullName
         $preview = Get-SessionPreviewFromRollout -Path $file.FullName
         if ($preview -eq "(no preview)" -and $payload -and $payload.cwd) {
-            $preview = "无用户消息 | $($payload.cwd)"
+            $preview = "No user message | $($payload.cwd)"
         }
         elseif ($preview -eq "(no preview)") {
-            $preview = "无预览 | $sessionId"
+            $preview = "No preview | $sessionId"
         }
 
         [PSCustomObject]@{
@@ -306,6 +461,7 @@ function Get-CodexSessionEntries {
             Preview = $preview
             Path = $file.FullName
             LastWriteTime = $file.LastWriteTime
+            WorkingDirectory = if ($payload -and $payload.cwd) { $payload.cwd } else { $null }
         }
     }
 
@@ -353,7 +509,7 @@ function Select-CodexSession {
     }
 }
 
-function Resolve-SessionId {
+function Resolve-SessionContext {
     param(
         [string]$SessionId,
         [string]$SessionsDir,
@@ -361,13 +517,23 @@ function Resolve-SessionId {
     )
 
     if ($SessionId) {
-        return $SessionId
+        $entry = Get-CodexSessionEntries -SessionsDir $SessionsDir -MaxCount ([int]::MaxValue) |
+            Where-Object { $_.SessionId -eq $SessionId } |
+            Select-Object -First 1
+
+        return [PSCustomObject]@{
+            SessionId = $SessionId
+            WorkingDirectory = if ($entry) { $entry.WorkingDirectory } else { $null }
+        }
     }
 
     $entries = @(Get-CodexSessionEntries -SessionsDir $SessionsDir -MaxCount $SessionLimit)
     $selected = Select-CodexSession -Entries $entries
     Write-Host ($script:Ui.ResumingSession -f $selected.SessionId) -ForegroundColor Green
-    return $selected.SessionId
+    return [PSCustomObject]@{
+        SessionId = $selected.SessionId
+        WorkingDirectory = $selected.WorkingDirectory
+    }
 }
 
 function Set-CodexDeveloperInstructions {
@@ -402,6 +568,7 @@ function Invoke-CodexAutopilot {
         [Parameter(Mandatory = $true)][string]$LastMessageFile,
         [Parameter(Mandatory = $true)][string]$ResumePrompt,
         [string]$SessionId,
+        [string]$WorkingDirectory,
         [string]$DonePattern,
         [string]$CompletionToken = "[TASK_COMPLETE]"
     )
@@ -409,28 +576,44 @@ function Invoke-CodexAutopilot {
     $turn = 0
     while ($turn -lt $MaxTurns) {
         $turn += 1
+        Set-WindowTitle -Title (Get-WindowTitle -Phase "Running" -Turn $turn -MaxTurns $MaxTurns)
         Write-Host ""
-        Write-Host ("========== Turn {0} / {1} ==========" -f $turn, $MaxTurns) -ForegroundColor Cyan
+        Write-Host (Get-TurnBanner -Turn $turn -MaxTurns $MaxTurns -Phase "Begin") -ForegroundColor Cyan
 
         $args = Get-CodexExecArgumentList -LastMessageFile $LastMessageFile -ResumePrompt $ResumePrompt -SessionId $SessionId
-        & codex @args
-        $exitCode = $LASTEXITCODE
+        $runningTitle = Get-WindowTitle -Phase "Running" -Turn $turn -MaxTurns $MaxTurns
+        if ($WorkingDirectory) {
+            Push-Location -LiteralPath $WorkingDirectory
+            try {
+                $exitCode = Invoke-CodexCommand -ArgumentList $args -WindowTitle $runningTitle
+            }
+            finally {
+                Pop-Location
+            }
+        }
+        else {
+            $exitCode = Invoke-CodexCommand -ArgumentList $args -WindowTitle $runningTitle
+        }
 
         if ($exitCode -ne 0) {
+            Set-WindowTitle -Title (Get-WindowTitle -Phase "Failed" -ExitCode $exitCode)
             Write-Host ($script:Ui.ExecExitCode -f $exitCode) -ForegroundColor Yellow
             return $exitCode
         }
 
         $lastMessage = ""
         if (Test-Path -LiteralPath $LastMessageFile) {
-            $lastMessage = Get-Content -LiteralPath $LastMessageFile -Raw
+            $lastMessage = Read-TextFileUtf8 -Path $LastMessageFile
             Write-Host ""
             Write-Host $script:Ui.LastMessageHeader -ForegroundColor DarkCyan
             Write-Host $lastMessage.TrimEnd()
             Write-Host "----------------------------" -ForegroundColor DarkCyan
         }
 
+        Write-Host (Get-TurnBanner -Turn $turn -MaxTurns $MaxTurns -Phase "End") -ForegroundColor DarkCyan
+
         if (Test-TaskCompletionSignal -Message $lastMessage -DonePattern $DonePattern -CompletionToken $CompletionToken) {
+            Set-WindowTitle -Title (Get-WindowTitle -Phase "Completed")
             Write-Host ""
             Write-Host $script:Ui.TaskComplete -ForegroundColor Green
             return 0
@@ -439,6 +622,7 @@ function Invoke-CodexAutopilot {
         Start-Sleep -Seconds $SleepSeconds
     }
 
+    Set-WindowTitle -Title (Get-WindowTitle -Phase "Completed")
     Write-Host ($script:Ui.MaxTurnsReached -f $MaxTurns) -ForegroundColor Yellow
     return 0
 }
@@ -457,7 +641,7 @@ if ($env:CODEX_AUTOPILOT_IMPORT_ONLY -ne "1") {
     }
 
     $activeDonePattern = if ($PatternOnly) { $DonePattern } else { "" }
-    $resolvedSessionId = Resolve-SessionId -SessionId $SessionId -SessionsDir $SessionsDir -SessionLimit $SessionLimit
-    $exitCode = Invoke-CodexAutopilot -MaxTurns $MaxTurns -SleepSeconds $SleepSeconds -LastMessageFile $LastMessageFile -ResumePrompt $ResumePrompt -SessionId $resolvedSessionId -DonePattern $activeDonePattern -CompletionToken $(if ($PatternOnly) { "" } else { $CompletionToken })
+    $sessionContext = Resolve-SessionContext -SessionId $SessionId -SessionsDir $SessionsDir -SessionLimit $SessionLimit
+    $exitCode = Invoke-CodexAutopilot -MaxTurns $MaxTurns -SleepSeconds $SleepSeconds -LastMessageFile $LastMessageFile -ResumePrompt $ResumePrompt -SessionId $sessionContext.SessionId -WorkingDirectory $sessionContext.WorkingDirectory -DonePattern $activeDonePattern -CompletionToken $(if ($PatternOnly) { "" } else { $CompletionToken })
     exit $exitCode
 }
