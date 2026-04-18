@@ -2,22 +2,26 @@ param(
     [int]$MaxTurns = 50,
     [int]$SleepSeconds = 3,
     [string]$LastMessageFile = (Join-Path $env:TEMP "codex_last_msg.txt"),
+    [string]$LogFile = (Join-Path $PSScriptRoot "codex-autopilot.log"),
+    [int]$TurnStallTimeoutSeconds = 1800,
+    [int]$LastMessageStableSeconds = 30,
     [string]$ResumePrompt,
-    [string]$DonePattern = "(nothing (more|left)|all done|task complete|fully complete)",
-    [string]$CompletionToken = "[TASK_COMPLETE]",
-    [string]$ConfigPath = (Join-Path $HOME ".codex\config.toml"),
     [string]$SessionsDir = (Join-Path $HOME ".codex\sessions"),
     [string]$SessionId,
-    [int]$SessionLimit = 30,
-    [switch]$SkipConfigUpdate,
-    [switch]$PatternOnly
+    [int]$SessionLimit = 30
 )
 
 $ErrorActionPreference = "Stop"
 
 $script:Ui = ConvertFrom-Json @'
 {
-  "ResumePrompt": "1.\u5148\u7528\u4e0a\u5e1d\u89c6\u89d2\u770b\u5f53\u524d\u72b6\u6001\u8ddd\u79bb\u539f\u59cb\u76ee\u6807\u591a\u8fdc 2.\u63d0\u4ea4\u6240\u6709\u66f4\u6539\u4f5c\u4e3a\u65b0\u5f81\u7a0b\u7684\u57fa\u7ebf 3.\u7ee7\u7eed\u6cbf\u7740\u539f\u59cb\u76ee\u6807\u63a8\u8fdb,\u8981\u9ad8\u6548\u5229\u7528\u5b50\u4ee3\u7406\u52a0\u901f\u63a8\u8fdb\u901f\u5ea6",
+  "ResumePrompt": "1.\u5148\u7528\u4e0a\u5e1d\u89c6\u89d2\u770b\u5f53\u524d\u72b6\u6001\u8ddd\u79bb\u6700\u7ec8\u9636\u6bb5\u7684\u6700\u7ec8\u76ee\u6807\u591a\u8fdc 2.\u63d0\u4ea4\u6240\u6709\u66f4\u6539\u4f5c\u4e3a\u65b0\u5f81\u7a0b\u7684\u57fa\u7ebf 3.\u7ee7\u7eed\u63a8\u8fdb\u65b0\u5f81\u7a0b,\u8981\u9ad8\u6548\u5229\u7528\u5b50\u4ee3\u7406\u52a0\u901f\u63a8\u8fdb\u901f\u5ea6",
+  "ResumePromptShort": "\u7ee7\u7eed",
+  "SelectPromptPrompt": "\u9009\u62e9\u63d0\u793a\u8bed: ",
+  "NoPromptSelected": "\u672a\u9009\u62e9\u4efb\u4f55\u63d0\u793a\u8bed\u3002",
+  "PromptHelp": "\u4f7f\u7528\u4e0a/\u4e0b\u65b9\u5411\u952e\u9009\u62e9\uff0c\u56de\u8f66\u786e\u8ba4\u3002",
+  "PromptLabelDefault": "\u8be6\u7ec6\u63d0\u793a\u8bed",
+  "PromptLabelShort": "\u7b80\u77ed\u63d0\u793a\u8bed\uff1a\u7ee7\u7eed",
   "NoSessionsFound": "\u672a\u627e\u5230 Codex \u4f1a\u8bdd\u3002",
   "NoSessionSelected": "\u672a\u9009\u62e9\u4efb\u4f55\u4f1a\u8bdd\u3002",
   "SelectSessionPrompt": "\u9009\u62e9\u4f1a\u8bdd: ",
@@ -38,7 +42,6 @@ if (-not $PSBoundParameters.ContainsKey("ResumePrompt")) {
     $ResumePrompt = $script:Ui.ResumePrompt
 }
 
-$script:CompletionInstruction = 'developer_instructions = "When the entire task is truly and fully complete with nothing left to do, end your final message with the exact token: [TASK_COMPLETE]. Do not use this token unless the task is genuinely finished."'
 $script:Utf8Encoding = New-Object System.Text.UTF8Encoding($false)
 
 function Initialize-ConsoleUtf8 {
@@ -76,26 +79,59 @@ function Read-TextFileUtf8 {
     }
 }
 
-function Test-TaskCompletionSignal {
+function Write-AutopilotLog {
     param(
-        [AllowEmptyString()][string]$Message,
-        [string]$DonePattern,
-        [string]$CompletionToken = "[TASK_COMPLETE]"
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Message
     )
 
-    if ([string]::IsNullOrWhiteSpace($Message)) {
-        return $false
+    $directory = Split-Path -Path $Path -Parent
+    if (-not [string]::IsNullOrWhiteSpace($directory) -and -not (Test-Path -LiteralPath $directory)) {
+        New-Item -ItemType Directory -Path $directory -Force | Out-Null
     }
 
-    if ($CompletionToken -and $Message.Contains($CompletionToken)) {
-        return $true
+    $line = "{0} {1}" -f ([DateTimeOffset]::Now.ToString("o")), $Message
+    [System.IO.File]::AppendAllText($Path, $line + [Environment]::NewLine, $script:Utf8Encoding)
+}
+
+function Invoke-FzfSelection {
+    param(
+        [Parameter(Mandatory = $true)][string]$CommandSource,
+        [Parameter(Mandatory = $true)][string[]]$Options,
+        [Parameter(Mandatory = $true)][string]$Prompt,
+        [int]$Height = 20
+    )
+
+    return $Options | & $CommandSource --prompt $Prompt --height $Height --reverse
+}
+
+function Get-ConsoleKeyInfo {
+    return $host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+}
+
+function Write-MenuOptions {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$Entries,
+        [Parameter(Mandatory = $true)][int]$SelectedIndex,
+        [Parameter(Mandatory = $true)][string]$Prompt,
+        [Parameter(Mandatory = $true)][string]$HelpText
+    )
+
+    Clear-Host
+    Write-Host $Prompt -ForegroundColor Cyan
+    Write-Host $HelpText -ForegroundColor DarkGray
+
+    for ($i = 0; $i -lt $Entries.Count; $i++) {
+        $prefix = if ($i -eq $SelectedIndex) { "> " } else { "  " }
+        Write-Host ($prefix + $Entries[$i].Label)
     }
 
-    if ($DonePattern -and $Message -match $DonePattern) {
-        return $true
+    $selectedEntry = $Entries[$SelectedIndex]
+    if ($selectedEntry.PSObject.Properties.Name -contains "Value" -and -not [string]::IsNullOrWhiteSpace($selectedEntry.Value)) {
+        Write-Host ""
+        Write-Host ("-" * 60) -ForegroundColor DarkGray
+        Write-Host $selectedEntry.Value
     }
-
-    return $false
 }
 
 function Get-TurnBanner {
@@ -217,7 +253,7 @@ function Stop-WindowTitleKeeper {
 function Get-CodexExecArgumentList {
     param(
         [Parameter(Mandatory = $true)][string]$LastMessageFile,
-        [Parameter(Mandatory = $true)][string]$ResumePrompt,
+        [string]$ResumePrompt,
         [string]$SessionId
     )
 
@@ -236,10 +272,53 @@ function Get-CodexExecArgumentList {
     ) + $resumeArgs
 }
 
+function Select-ResumePrompt {
+    $entries = @(
+        [PSCustomObject]@{
+            Key = "Default"
+            Label = $script:Ui.PromptLabelDefault
+            Value = $script:Ui.ResumePrompt
+        }
+        [PSCustomObject]@{
+            Key = "Short"
+            Label = $script:Ui.PromptLabelShort
+            Value = $script:Ui.ResumePromptShort
+        }
+    )
+
+    $selectedIndex = 0
+    Write-MenuOptions -Entries $entries -SelectedIndex $selectedIndex -Prompt $script:Ui.SelectPromptPrompt -HelpText $script:Ui.PromptHelp
+
+    while ($true) {
+        $keyInfo = Get-ConsoleKeyInfo
+        switch ($keyInfo.VirtualKeyCode) {
+            38 {
+                $selectedIndex = ($selectedIndex - 1 + $entries.Count) % $entries.Count
+                Write-MenuOptions -Entries $entries -SelectedIndex $selectedIndex -Prompt $script:Ui.SelectPromptPrompt -HelpText $script:Ui.PromptHelp
+            }
+            40 {
+                $selectedIndex = ($selectedIndex + 1) % $entries.Count
+                Write-MenuOptions -Entries $entries -SelectedIndex $selectedIndex -Prompt $script:Ui.SelectPromptPrompt -HelpText $script:Ui.PromptHelp
+            }
+            13 {
+                return $entries[$selectedIndex].Value
+            }
+            27 {
+                throw $script:Ui.NoPromptSelected
+            }
+        }
+    }
+}
+
 function Invoke-CodexCommand {
     param(
         [Parameter(Mandatory = $true)][string[]]$ArgumentList,
-        [string]$WindowTitle
+        [string]$WindowTitle,
+        [int]$TurnStallTimeoutSeconds = 0,
+        [string]$LastMessageFile,
+        [int]$LastMessageStableSeconds = 30,
+        [string]$LogFile,
+        [int]$Turn = 0
     )
 
     $keeper = if ([string]::IsNullOrWhiteSpace($WindowTitle)) {
@@ -249,18 +328,190 @@ function Invoke-CodexCommand {
         Start-WindowTitleKeeper -Title $WindowTitle
     }
     try {
-        Invoke-CodexExecutable -ArgumentList $ArgumentList | Out-Host
-        return [int]$LASTEXITCODE
+        if ($TurnStallTimeoutSeconds -gt 0 -and -not [string]::IsNullOrWhiteSpace($LastMessageFile) -and -not [string]::IsNullOrWhiteSpace($LogFile) -and $Turn -gt 0) {
+            $process = Start-CodexProcess -FilePath (Get-CodexExecutablePath) -ArgumentList $ArgumentList
+            return Wait-ForCodexProcessExit -Process $process -Turn $Turn -LastMessageFile $LastMessageFile -TurnStallTimeoutSeconds $TurnStallTimeoutSeconds -LastMessageStableSeconds $LastMessageStableSeconds -LogFile $LogFile
+        }
+        return [int](Invoke-CodexExecutable -ArgumentList $ArgumentList)
     }
     finally {
         Stop-WindowTitleKeeper -Keeper $keeper
     }
 }
 
+function Get-CodexExecutablePath {
+    $preferredExePath = Join-Path $env:APPDATA "npm\node_modules\@openai\codex\node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\codex\codex.exe"
+    if (Test-Path -LiteralPath $preferredExePath) {
+        return $preferredExePath
+    }
+
+    $preferredWrapperPath = Join-Path $env:APPDATA "npm\codex.ps1"
+    if (Test-Path -LiteralPath $preferredWrapperPath) {
+        return $preferredWrapperPath
+    }
+
+    $command = Get-Command codex -ErrorAction Stop
+    return $command.Source
+}
+
 function Invoke-CodexExecutable {
     param([Parameter(Mandatory = $true)][string[]]$ArgumentList)
 
-    & codex @ArgumentList
+    $codexExecutable = Get-CodexExecutablePath
+    if ($codexExecutable.EndsWith(".ps1", [System.StringComparison]::OrdinalIgnoreCase)) {
+        $wrapperArgs = @(
+            "-NoLogo",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            $codexExecutable
+        ) + $ArgumentList
+        $process = Start-CodexProcess -FilePath (Join-Path $PSHOME "powershell.exe") -ArgumentList $wrapperArgs
+        $process.WaitForExit()
+        return [int]$process.ExitCode
+    }
+
+    $process = Start-CodexProcess -FilePath $codexExecutable -ArgumentList $ArgumentList
+    $process.WaitForExit()
+    return [int]$process.ExitCode
+}
+
+function ConvertTo-ProcessArgumentString {
+    param([Parameter(Mandatory = $true)][string[]]$ArgumentList)
+
+    $escapedArguments = foreach ($argument in $ArgumentList) {
+        if ($null -eq $argument) {
+            '""'
+            continue
+        }
+
+        if ($argument -notmatch '[\s"]') {
+            $argument
+            continue
+        }
+
+        $escaped = $argument -replace '(\\*)"', '$1$1\"'
+        $escaped = $escaped -replace '(\\+)$', '$1$1'
+        '"{0}"' -f $escaped
+    }
+
+    return ($escapedArguments -join ' ')
+}
+
+function Start-CodexProcess {
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [Parameter(Mandatory = $true)][string[]]$ArgumentList
+    )
+
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $FilePath
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardInput = $true
+    $startInfo.CreateNoWindow = $false
+    if ($startInfo.PSObject.Properties.Name -contains 'ArgumentList' -and $null -ne $startInfo.ArgumentList) {
+        foreach ($argument in $ArgumentList) {
+            [void]$startInfo.ArgumentList.Add($argument)
+        }
+    }
+    elseif ($startInfo.PSObject.Properties.Name -contains 'Arguments') {
+        $startInfo.Arguments = ConvertTo-ProcessArgumentString -ArgumentList $ArgumentList
+    }
+    else {
+        throw "ProcessStartInfo does not expose ArgumentList or Arguments."
+    }
+
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $startInfo
+    if (-not $process.Start()) {
+        throw ("Failed to start process: {0}" -f $FilePath)
+    }
+
+    if ($null -ne $process.StandardInput) {
+        $process.StandardInput.Close()
+    }
+
+    return $process
+}
+
+function Stop-ProcessTree {
+    param([Parameter(Mandatory = $true)][int]$ProcessId)
+
+    $children = Get-CimInstance Win32_Process -Filter ("ParentProcessId = {0}" -f $ProcessId) -ErrorAction SilentlyContinue
+    foreach ($child in @($children)) {
+        Stop-ProcessTree -ProcessId $child.ProcessId
+    }
+
+    Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
+}
+
+function Test-CodexTurnStalled {
+    param(
+        [Parameter(Mandatory = $true)][datetime]$TurnStartTime,
+        [Parameter(Mandatory = $true)][string]$LastMessageFile,
+        [Parameter(Mandatory = $true)][int]$TurnStallTimeoutSeconds,
+        [Parameter(Mandatory = $true)][int]$LastMessageStableSeconds
+    )
+
+    if ($TurnStallTimeoutSeconds -le 0) {
+        return $false
+    }
+
+    try {
+        $item = Get-Item -LiteralPath $LastMessageFile -ErrorAction Stop
+    }
+    catch {
+        return $false
+    }
+
+    if ($item.Length -le 0) {
+        return $false
+    }
+
+    $now = Get-Date
+    $elapsedSeconds = (New-TimeSpan -Start $TurnStartTime -End $now).TotalSeconds
+    if ($elapsedSeconds -lt $TurnStallTimeoutSeconds) {
+        return $false
+    }
+
+    $stableSeconds = (New-TimeSpan -Start $item.LastWriteTime -End $now).TotalSeconds
+    return ($stableSeconds -ge $LastMessageStableSeconds)
+}
+
+function Wait-ForCodexProcessExit {
+    param(
+        [Parameter(Mandatory = $true)]$Process,
+        [Parameter(Mandatory = $true)][int]$Turn,
+        [Parameter(Mandatory = $true)][string]$LastMessageFile,
+        [Parameter(Mandatory = $true)][int]$TurnStallTimeoutSeconds,
+        [Parameter(Mandatory = $true)][int]$LastMessageStableSeconds,
+        [Parameter(Mandatory = $true)][string]$LogFile
+    )
+
+    $turnStartTime = Get-Date
+    while (-not $Process.WaitForExit(1000)) {
+        if (Test-CodexTurnStalled -TurnStartTime $turnStartTime -LastMessageFile $LastMessageFile -TurnStallTimeoutSeconds $TurnStallTimeoutSeconds -LastMessageStableSeconds $LastMessageStableSeconds) {
+            Write-AutopilotLog -Path $LogFile -Message ("event=turn_stall_detected turn={0} timeout_seconds={1}" -f $Turn, $TurnStallTimeoutSeconds)
+            Stop-ProcessTree -ProcessId $Process.Id
+            [void]$Process.WaitForExit(5000)
+            if (-not $Process.HasExited) {
+                Write-AutopilotLog -Path $LogFile -Message ("event=stop reason=turn_stall_unrecoverable turn={0}" -f $Turn)
+                throw ("Unable to recover stalled codex process for turn {0}" -f $Turn)
+            }
+
+            Write-AutopilotLog -Path $LogFile -Message ("event=turn_stall_recovered turn={0}" -f $Turn)
+            return [PSCustomObject]@{
+                ExitCode = 0
+                StallRecovered = $true
+            }
+        }
+    }
+
+    return [PSCustomObject]@{
+        ExitCode = [int]$Process.ExitCode
+        StallRecovered = $false
+    }
 }
 
 function Get-SessionIdFromRolloutPath {
@@ -434,7 +685,10 @@ function Get-CodexSessionEntries {
     }
 
     $files = @(Get-ChildItem -LiteralPath $SessionsDir -Recurse -File -Filter "rollout-*.jsonl" |
-        Sort-Object LastWriteTime -Descending)
+        Sort-Object `
+            @{ Expression = { Get-SessionTimestampFromRolloutPath -Path $_.FullName }; Descending = $true }, `
+            @{ Expression = { $_.Name }; Descending = $true }, `
+            @{ Expression = { $_.LastWriteTime }; Descending = $true })
 
     $entries = foreach ($file in $files) {
         if (-not (Test-IsPrimarySessionRollout -Path $file.FullName)) {
@@ -536,67 +790,70 @@ function Resolve-SessionContext {
     }
 }
 
-function Set-CodexDeveloperInstructions {
-    param([Parameter(Mandatory = $true)][string]$ConfigPath)
-
-    $content = if (Test-Path -LiteralPath $ConfigPath) {
-        Get-Content -LiteralPath $ConfigPath -Raw
-    }
-    else {
-        ""
-    }
-
-    if ($content -match [regex]::Escape($script:CompletionInstruction)) {
-        return $false
-    }
-
-    $newContent = if ([string]::IsNullOrWhiteSpace($content)) {
-        "$($script:CompletionInstruction)`r`n"
-    }
-    else {
-        "$($script:CompletionInstruction)`r`n$content"
-    }
-
-    Set-Content -LiteralPath $ConfigPath -Value $newContent
-    return $true
-}
-
 function Invoke-CodexAutopilot {
     param(
         [int]$MaxTurns = 50,
         [int]$SleepSeconds = 3,
         [Parameter(Mandatory = $true)][string]$LastMessageFile,
+        [string]$LogFile = (Join-Path $PSScriptRoot "codex-autopilot.log"),
+        [int]$TurnStallTimeoutSeconds = 1800,
+        [int]$LastMessageStableSeconds = 30,
         [Parameter(Mandatory = $true)][string]$ResumePrompt,
         [string]$SessionId,
-        [string]$WorkingDirectory,
-        [string]$DonePattern,
-        [string]$CompletionToken = "[TASK_COMPLETE]"
+        [string]$WorkingDirectory
     )
 
     $turn = 0
     while ($turn -lt $MaxTurns) {
         $turn += 1
+        Write-AutopilotLog -Path $LogFile -Message ("event=turn_start turn={0} max_turns={1} session_id={2} working_directory={3}" -f $turn, $MaxTurns, $(if ($SessionId) { $SessionId } else { "-" }), $(if ($WorkingDirectory) { $WorkingDirectory } else { "-" }))
         Set-WindowTitle -Title (Get-WindowTitle -Phase "Running" -Turn $turn -MaxTurns $MaxTurns)
         Write-Host ""
         Write-Host (Get-TurnBanner -Turn $turn -MaxTurns $MaxTurns -Phase "Begin") -ForegroundColor Cyan
 
         $args = Get-CodexExecArgumentList -LastMessageFile $LastMessageFile -ResumePrompt $ResumePrompt -SessionId $SessionId
+        Write-AutopilotLog -Path $LogFile -Message ("event=exec_invoke turn={0} command={1}" -f $turn, ((Get-CodexExecutablePath), ($args -join ' ') -join ' '))
         $runningTitle = Get-WindowTitle -Phase "Running" -Turn $turn -MaxTurns $MaxTurns
         if ($WorkingDirectory) {
             Push-Location -LiteralPath $WorkingDirectory
             try {
-                $exitCode = Invoke-CodexCommand -ArgumentList $args -WindowTitle $runningTitle
+                try {
+                    $commandResult = Invoke-CodexCommand -ArgumentList $args -WindowTitle $runningTitle -TurnStallTimeoutSeconds $TurnStallTimeoutSeconds -LastMessageFile $LastMessageFile -LastMessageStableSeconds $LastMessageStableSeconds -LogFile $LogFile -Turn $turn
+                }
+                catch {
+                    Write-AutopilotLog -Path $LogFile -Message ("event=exec_exception turn={0} message={1}" -f $turn, $_.Exception.Message)
+                    throw
+                }
             }
             finally {
                 Pop-Location
             }
         }
         else {
-            $exitCode = Invoke-CodexCommand -ArgumentList $args -WindowTitle $runningTitle
+            try {
+                $commandResult = Invoke-CodexCommand -ArgumentList $args -WindowTitle $runningTitle -TurnStallTimeoutSeconds $TurnStallTimeoutSeconds -LastMessageFile $LastMessageFile -LastMessageStableSeconds $LastMessageStableSeconds -LogFile $LogFile -Turn $turn
+            }
+            catch {
+                Write-AutopilotLog -Path $LogFile -Message ("event=exec_exception turn={0} message={1}" -f $turn, $_.Exception.Message)
+                throw
+            }
         }
+
+        if ($commandResult -is [int]) {
+            $exitCode = [int]$commandResult
+        }
+        elseif ($null -ne $commandResult -and $commandResult.PSObject.Properties.Name -contains "ExitCode") {
+            $exitCode = [int]$commandResult.ExitCode
+        }
+        else {
+            throw "Invoke-CodexCommand returned an unsupported result."
+        }
+
+        Write-AutopilotLog -Path $LogFile -Message ("event=exec_exit turn={0} exit_code={1}" -f $turn, $exitCode)
 
         if ($exitCode -ne 0) {
             Set-WindowTitle -Title (Get-WindowTitle -Phase "Failed" -ExitCode $exitCode)
+            Write-AutopilotLog -Path $LogFile -Message ("event=stop reason=exec_exit_nonzero turn={0} exit_code={1}" -f $turn, $exitCode)
             Write-Host ($script:Ui.ExecExitCode -f $exitCode) -ForegroundColor Yellow
             return $exitCode
         }
@@ -604,6 +861,7 @@ function Invoke-CodexAutopilot {
         $lastMessage = ""
         if (Test-Path -LiteralPath $LastMessageFile) {
             $lastMessage = Read-TextFileUtf8 -Path $LastMessageFile
+            Write-AutopilotLog -Path $LogFile -Message ("event=last_message_read turn={0} length={1}" -f $turn, $lastMessage.Length)
             Write-Host ""
             Write-Host $script:Ui.LastMessageHeader -ForegroundColor DarkCyan
             Write-Host $lastMessage.TrimEnd()
@@ -611,37 +869,28 @@ function Invoke-CodexAutopilot {
         }
 
         Write-Host (Get-TurnBanner -Turn $turn -MaxTurns $MaxTurns -Phase "End") -ForegroundColor DarkCyan
+        Write-AutopilotLog -Path $LogFile -Message ("event=turn_end turn={0} exit_code={1}" -f $turn, $exitCode)
 
-        if (Test-TaskCompletionSignal -Message $lastMessage -DonePattern $DonePattern -CompletionToken $CompletionToken) {
-            Set-WindowTitle -Title (Get-WindowTitle -Phase "Completed")
-            Write-Host ""
-            Write-Host $script:Ui.TaskComplete -ForegroundColor Green
-            return 0
-        }
-
+        Write-AutopilotLog -Path $LogFile -Message ("event=sleep_start turn={0} seconds={1}" -f $turn, $SleepSeconds)
         Start-Sleep -Seconds $SleepSeconds
+        Write-AutopilotLog -Path $LogFile -Message ("event=sleep_end turn={0}" -f $turn)
+        if ($turn -lt $MaxTurns) {
+            Write-AutopilotLog -Path $LogFile -Message ("event=loop_continue next_turn={0}" -f ($turn + 1))
+        }
     }
 
     Set-WindowTitle -Title (Get-WindowTitle -Phase "Completed")
+    Write-AutopilotLog -Path $LogFile -Message ("event=stop reason=max_turns_reached turn={0} exit_code=0" -f $turn)
     Write-Host ($script:Ui.MaxTurnsReached -f $MaxTurns) -ForegroundColor Yellow
     return 0
 }
 
 if ($env:CODEX_AUTOPILOT_IMPORT_ONLY -ne "1") {
     Initialize-ConsoleUtf8
-
-    if (-not $PatternOnly -and -not $SkipConfigUpdate) {
-        $updated = Set-CodexDeveloperInstructions -ConfigPath $ConfigPath
-        if ($updated) {
-            Write-Host ($script:Ui.ConfigUpdated -f $ConfigPath) -ForegroundColor Green
-        }
-        else {
-            Write-Host ($script:Ui.ConfigAlreadyUpdated -f $ConfigPath) -ForegroundColor DarkGray
-        }
-    }
-
-    $activeDonePattern = if ($PatternOnly) { $DonePattern } else { "" }
     $sessionContext = Resolve-SessionContext -SessionId $SessionId -SessionsDir $SessionsDir -SessionLimit $SessionLimit
-    $exitCode = Invoke-CodexAutopilot -MaxTurns $MaxTurns -SleepSeconds $SleepSeconds -LastMessageFile $LastMessageFile -ResumePrompt $ResumePrompt -SessionId $sessionContext.SessionId -WorkingDirectory $sessionContext.WorkingDirectory -DonePattern $activeDonePattern -CompletionToken $(if ($PatternOnly) { "" } else { $CompletionToken })
+    if (-not $PSBoundParameters.ContainsKey("ResumePrompt")) {
+        $ResumePrompt = Select-ResumePrompt
+    }
+    $exitCode = Invoke-CodexAutopilot -MaxTurns $MaxTurns -SleepSeconds $SleepSeconds -LastMessageFile $LastMessageFile -LogFile $LogFile -TurnStallTimeoutSeconds $TurnStallTimeoutSeconds -LastMessageStableSeconds $LastMessageStableSeconds -ResumePrompt $ResumePrompt -SessionId $sessionContext.SessionId -WorkingDirectory $sessionContext.WorkingDirectory
     exit $exitCode
 }
