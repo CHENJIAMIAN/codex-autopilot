@@ -83,6 +83,41 @@ function Read-TextFileUtf8 {
     }
 }
 
+function Write-TextFileUtf8Atomic {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Text
+    )
+
+    $directory = Split-Path -Path $Path -Parent
+    if (-not [string]::IsNullOrWhiteSpace($directory) -and -not (Test-Path -LiteralPath $directory)) {
+        New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    }
+
+    $tempDirectory = if ([string]::IsNullOrWhiteSpace($directory)) { "." } else { $directory }
+    $leaf = Split-Path -Path $Path -Leaf
+    $tempPath = Join-Path $tempDirectory ("{0}.{1}.tmp" -f $leaf, [guid]::NewGuid().ToString("N"))
+    $backupPath = Join-Path $tempDirectory ("{0}.{1}.bak" -f $leaf, [guid]::NewGuid().ToString("N"))
+
+    try {
+        [System.IO.File]::WriteAllText($tempPath, $Text, $script:Utf8Encoding)
+        if (Test-Path -LiteralPath $Path) {
+            [System.IO.File]::Replace($tempPath, $Path, $backupPath)
+        }
+        else {
+            Move-Item -LiteralPath $tempPath -Destination $Path -Force
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempPath) {
+            Remove-Item -LiteralPath $tempPath -Force
+        }
+        if (Test-Path -LiteralPath $backupPath) {
+            Remove-Item -LiteralPath $backupPath -Force
+        }
+    }
+}
+
 function Write-AutopilotLog {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -156,7 +191,7 @@ function Write-AutopilotRunState {
     }
 
     $json = $state | ConvertTo-Json -Depth 4
-    [System.IO.File]::WriteAllText($Path, $json + [Environment]::NewLine, $script:Utf8Encoding)
+    Write-TextFileUtf8Atomic -Path $Path -Text ($json + [Environment]::NewLine)
 }
 
 function Read-AutopilotRunState {

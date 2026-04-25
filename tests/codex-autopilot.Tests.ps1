@@ -469,6 +469,18 @@ Describe "Read-TextFileUtf8" {
     }
 }
 
+Describe "Write-TextFileUtf8Atomic" {
+    It "replaces the destination content and leaves no temp state file" {
+        $path = Join-Path $TestDrive "state.json"
+        [System.IO.File]::WriteAllText($path, "old", $script:Utf8Encoding)
+
+        Write-TextFileUtf8Atomic -Path $path -Text "new"
+
+        Read-TextFileUtf8 -Path $path | Should Be "new"
+        @(Get-ChildItem -LiteralPath $TestDrive -Filter "state.json.*.tmp").Count | Should Be 0
+    }
+}
+
 Describe "Get-TurnBanner" {
     It "builds a visible begin banner" {
         $expected = "========== Turn 3 / 50 {0} ==========" -f ([string]::Concat([char]0x5F00, [char]0x59CB))
