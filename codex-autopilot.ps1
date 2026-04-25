@@ -159,6 +159,119 @@ function Write-AutopilotRunState {
     [System.IO.File]::WriteAllText($Path, $json + [Environment]::NewLine, $script:Utf8Encoding)
 }
 
+function Read-AutopilotRunState {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path)) {
+        return $null
+    }
+
+    try {
+        $content = Read-TextFileUtf8 -Path $Path
+        if ([string]::IsNullOrWhiteSpace($content)) {
+            return $null
+        }
+
+        return $content | ConvertFrom-Json
+    }
+    catch {
+        return [pscustomobject]@{
+            Invalid = $true
+            Error = $_.Exception.Message
+        }
+    }
+}
+
+function Test-RunStateValueEquals {
+    param(
+        $Actual,
+        [string]$Expected
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Expected)) {
+        return [string]::IsNullOrWhiteSpace([string]$Actual)
+    }
+
+    return ([string]$Actual).Trim() -eq $Expected.Trim()
+}
+
+function ConvertTo-RunStateInt {
+    param($Value)
+
+    $parsed = 0
+    if ([int]::TryParse([string]$Value, [ref]$parsed)) {
+        return $parsed
+    }
+
+    return $null
+}
+
+function Get-AutopilotResumeTurn {
+    param(
+        $State,
+        [int]$MaxTurns,
+        [string]$SessionId,
+        [string]$WorkingDirectory,
+        [string]$LogFile
+    )
+
+    if ($null -eq $State) {
+        return 0
+    }
+
+    if ($State.PSObject.Properties.Name -contains "Invalid" -and $State.Invalid) {
+        Write-AutopilotLog -Path $LogFile -Message ("event=run_state_ignored reason=invalid_json message={0}" -f $State.Error)
+        return 0
+    }
+
+    if (-not (Test-RunStateValueEquals -Actual $State.session_id -Expected $SessionId)) {
+        Write-AutopilotLog -Path $LogFile -Message "event=run_state_ignored reason=session_mismatch"
+        return 0
+    }
+
+    if (-not (Test-RunStateValueEquals -Actual $State.working_directory -Expected $WorkingDirectory)) {
+        Write-AutopilotLog -Path $LogFile -Message "event=run_state_ignored reason=working_directory_mismatch"
+        return 0
+    }
+
+    $stateTurn = ConvertTo-RunStateInt -Value $State.turn
+    $stateExitCode = ConvertTo-RunStateInt -Value $State.last_exit_code
+    $stateStopReason = [string]$State.stop_reason
+
+    if ($null -eq $stateTurn -or $null -eq $stateExitCode -or $stateTurn -lt 1) {
+        Write-AutopilotLog -Path $LogFile -Message "event=run_state_ignored reason=invalid_fields"
+        return 0
+    }
+
+    if ($stateStopReason -eq "max_turns_reached") {
+        if ($stateTurn -ge $MaxTurns) {
+            Write-AutopilotLog -Path $LogFile -Message ("event=run_state_complete turn={0} max_turns={1}" -f $stateTurn, $MaxTurns)
+            return $MaxTurns
+        }
+
+        if ($stateExitCode -eq 0) {
+            Write-AutopilotLog -Path $LogFile -Message ("event=run_state_restored turn={0} next_turn={1} reason=max_turns_extended" -f $stateTurn, ($stateTurn + 1))
+            return $stateTurn
+        }
+
+        Write-AutopilotLog -Path $LogFile -Message ("event=run_state_ignored reason=max_turns_reached_nonzero turn={0} exit_code={1}" -f $stateTurn, $stateExitCode)
+        return 0
+    }
+
+    if ($stateStopReason -ne "loop_continue" -or $stateExitCode -ne 0) {
+        Write-AutopilotLog -Path $LogFile -Message ("event=run_state_ignored reason={0} turn={1} exit_code={2}" -f $(if ($stateStopReason) { $stateStopReason } else { "unknown" }), $stateTurn, $stateExitCode)
+        return 0
+    }
+
+    if ($stateTurn -ge $MaxTurns) {
+        Write-AutopilotLog -Path $LogFile -Message ("event=run_state_complete turn={0} max_turns={1}" -f $stateTurn, $MaxTurns)
+        return $MaxTurns
+    }
+
+    Write-AutopilotLog -Path $LogFile -Message ("event=run_state_restored turn={0} next_turn={1}" -f $stateTurn, ($stateTurn + 1))
+    return $stateTurn
+}
+
 function Invoke-FzfSelection {
     param(
         [Parameter(Mandatory = $true)][string]$CommandSource,
@@ -888,7 +1001,13 @@ function Invoke-CodexAutopilot {
         [string]$CodexProfile
     )
 
-    $turn = 0
+    $turn = Get-AutopilotResumeTurn -State (Read-AutopilotRunState -Path $RunStateFile) -MaxTurns $MaxTurns -SessionId $SessionId -WorkingDirectory $WorkingDirectory -LogFile $LogFile
+    if ($turn -ge $MaxTurns) {
+        Set-WindowTitle -Title (Get-WindowTitle -Phase "Completed")
+        Write-Host ($script:Ui.MaxTurnsReached -f $MaxTurns) -ForegroundColor Yellow
+        return 0
+    }
+
     while ($turn -lt $MaxTurns) {
         $turn += 1
         Write-AutopilotLog -Path $LogFile -Message ("event=turn_start turn={0} max_turns={1} session_id={2} working_directory={3}" -f $turn, $MaxTurns, $(if ($SessionId) { $SessionId } else { "-" }), $(if ($WorkingDirectory) { $WorkingDirectory } else { "-" }))
@@ -958,12 +1077,12 @@ function Invoke-CodexAutopilot {
 
         Write-Host (Get-TurnBanner -Turn $turn -MaxTurns $MaxTurns -Phase "End") -ForegroundColor DarkCyan
         Write-AutopilotLog -Path $LogFile -Message ("event=turn_end turn={0} exit_code={1}" -f $turn, $exitCode)
-        Write-AutopilotRunState -Path $RunStateFile -Turn $turn -MaxTurns $MaxTurns -LastExitCode $exitCode -StopReason $(if ($turn -lt $MaxTurns) { "loop_continue" } else { "" }) -SessionId $SessionId -WorkingDirectory $WorkingDirectory -LastMessage $lastMessage -StallRecovered $stallRecovered
+        Write-AutopilotRunState -Path $RunStateFile -Turn $turn -MaxTurns $MaxTurns -LastExitCode $exitCode -StopReason $(if ($turn -lt $MaxTurns) { "loop_continue" } else { "max_turns_reached" }) -SessionId $SessionId -WorkingDirectory $WorkingDirectory -LastMessage $lastMessage -StallRecovered $stallRecovered
 
-        Write-AutopilotLog -Path $LogFile -Message ("event=sleep_start turn={0} seconds={1}" -f $turn, $SleepSeconds)
-        Start-Sleep -Seconds $SleepSeconds
-        Write-AutopilotLog -Path $LogFile -Message ("event=sleep_end turn={0}" -f $turn)
         if ($turn -lt $MaxTurns) {
+            Write-AutopilotLog -Path $LogFile -Message ("event=sleep_start turn={0} seconds={1}" -f $turn, $SleepSeconds)
+            Start-Sleep -Seconds $SleepSeconds
+            Write-AutopilotLog -Path $LogFile -Message ("event=sleep_end turn={0}" -f $turn)
             Write-AutopilotLog -Path $LogFile -Message ("event=loop_continue next_turn={0}" -f ($turn + 1))
         }
     }

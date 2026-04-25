@@ -891,6 +891,120 @@ Describe "Invoke-CodexAutopilot" {
         $state.last_message_length | Should Be (Read-TextFileUtf8 -Path $lastMessagePath).Length
         $state.working_directory.Trim() | Should Be ([string]$TestDrive).Trim()
     }
+
+    It "resumes from the next turn when the run state ended with loop_continue" {
+        $lastMessagePath = Join-Path $TestDrive "last-message-resume-state.txt"
+        $runStatePath = Join-Path $TestDrive "run-state-resume.json"
+        $logPath = Join-Path $TestDrive "autopilot-resume-state.log"
+        Set-Content -LiteralPath $lastMessagePath -Value "resume answer"
+        @{
+            session_id = "ffffffff-ffff-ffff-ffff-ffffffffffff"
+            working_directory = ""
+            turn = 1
+            max_turns = 3
+            last_exit_code = 0
+            stop_reason = "loop_continue"
+            stall_recovered = $false
+            last_message_length = 13
+            last_message_sha256 = "ignored"
+        } | ConvertTo-Json | Set-Content -LiteralPath $runStatePath
+
+        Mock Get-CodexExecArgumentList { return @("exec") }
+        Mock Invoke-CodexCommand { return 0 }
+        Mock Start-Sleep {}
+        Mock Set-WindowTitle {}
+
+        $exitCode = Invoke-CodexAutopilot -MaxTurns 3 -SleepSeconds 0 -LastMessageFile $lastMessagePath -ResumePrompt "Continue" -SessionId "ffffffff-ffff-ffff-ffff-ffffffffffff" -LogFile $logPath -RunStateFile $runStatePath
+
+        $exitCode | Should Be 0
+        Assert-MockCalled Invoke-CodexCommand -Times 2
+        $logText = Read-TextFileUtf8 -Path $logPath
+        $logText | Should Match 'event=run_state_restored turn=1 next_turn=2'
+        $logText | Should Not Match 'event=turn_start turn=1'
+        $logText | Should Match 'event=turn_start turn=2'
+        $logText | Should Match 'event=turn_start turn=3'
+    }
+
+    It "does not resume a run state that already reached max turns" {
+        $lastMessagePath = Join-Path $TestDrive "last-message-completed-state.txt"
+        $runStatePath = Join-Path $TestDrive "run-state-completed.json"
+        $logPath = Join-Path $TestDrive "autopilot-completed-state.log"
+        Set-Content -LiteralPath $lastMessagePath -Value "done"
+        @{
+            session_id = "ffffffff-ffff-ffff-ffff-ffffffffffff"
+            working_directory = ""
+            turn = 3
+            max_turns = 3
+            last_exit_code = 0
+            stop_reason = "max_turns_reached"
+        } | ConvertTo-Json | Set-Content -LiteralPath $runStatePath
+
+        Mock Get-CodexExecArgumentList { return @("exec") }
+        Mock Invoke-CodexCommand { throw "should not execute codex when run state is complete" }
+        Mock Start-Sleep {}
+        Mock Set-WindowTitle {}
+
+        $exitCode = Invoke-CodexAutopilot -MaxTurns 3 -SleepSeconds 0 -LastMessageFile $lastMessagePath -ResumePrompt "Continue" -SessionId "ffffffff-ffff-ffff-ffff-ffffffffffff" -LogFile $logPath -RunStateFile $runStatePath
+
+        $exitCode | Should Be 0
+        (Read-TextFileUtf8 -Path $logPath) | Should Match 'event=run_state_complete turn=3 max_turns=3'
+    }
+
+    It "resumes a completed run state when max turns is increased" {
+        $lastMessagePath = Join-Path $TestDrive "last-message-completed-extended.txt"
+        $runStatePath = Join-Path $TestDrive "run-state-completed-extended.json"
+        $logPath = Join-Path $TestDrive "autopilot-completed-extended.log"
+        Set-Content -LiteralPath $lastMessagePath -Value "extended"
+        @{
+            session_id = "ffffffff-ffff-ffff-ffff-ffffffffffff"
+            working_directory = ""
+            turn = 3
+            max_turns = 3
+            last_exit_code = 0
+            stop_reason = "max_turns_reached"
+        } | ConvertTo-Json | Set-Content -LiteralPath $runStatePath
+
+        Mock Get-CodexExecArgumentList { return @("exec") }
+        Mock Invoke-CodexCommand { return 0 }
+        Mock Start-Sleep {}
+        Mock Set-WindowTitle {}
+
+        $exitCode = Invoke-CodexAutopilot -MaxTurns 5 -SleepSeconds 0 -LastMessageFile $lastMessagePath -ResumePrompt "Continue" -SessionId "ffffffff-ffff-ffff-ffff-ffffffffffff" -LogFile $logPath -RunStateFile $runStatePath
+
+        $exitCode | Should Be 0
+        Assert-MockCalled Invoke-CodexCommand -Times 2
+        $logText = Read-TextFileUtf8 -Path $logPath
+        $logText | Should Match 'event=run_state_restored turn=3 next_turn=4 reason=max_turns_extended'
+        $logText | Should Match 'event=turn_start turn=4'
+        $logText | Should Match 'event=turn_start turn=5'
+    }
+
+    It "ignores a run state with invalid numeric fields" {
+        $lastMessagePath = Join-Path $TestDrive "last-message-invalid-state.txt"
+        $runStatePath = Join-Path $TestDrive "run-state-invalid.json"
+        $logPath = Join-Path $TestDrive "autopilot-invalid-state.log"
+        Set-Content -LiteralPath $lastMessagePath -Value "invalid"
+        @{
+            session_id = "ffffffff-ffff-ffff-ffff-ffffffffffff"
+            working_directory = ""
+            turn = "abc"
+            max_turns = 3
+            last_exit_code = 0
+            stop_reason = "loop_continue"
+        } | ConvertTo-Json | Set-Content -LiteralPath $runStatePath
+
+        Mock Get-CodexExecArgumentList { return @("exec") }
+        Mock Invoke-CodexCommand { return 0 }
+        Mock Start-Sleep {}
+        Mock Set-WindowTitle {}
+
+        $exitCode = Invoke-CodexAutopilot -MaxTurns 1 -SleepSeconds 0 -LastMessageFile $lastMessagePath -ResumePrompt "Continue" -SessionId "ffffffff-ffff-ffff-ffff-ffffffffffff" -LogFile $logPath -RunStateFile $runStatePath
+
+        $exitCode | Should Be 0
+        $logText = Read-TextFileUtf8 -Path $logPath
+        $logText | Should Match 'event=run_state_ignored reason=invalid_fields'
+        $logText | Should Match 'event=turn_start turn=1'
+    }
 }
 Describe "Initialize-ConsoleUtf8" {
     It "sets console and pipeline encodings to utf8" {

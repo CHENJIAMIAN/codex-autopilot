@@ -28,13 +28,13 @@ If you do not pass `-ResumePrompt`, the script will first show a prompt picker. 
 powershell -ExecutionPolicy Bypass -File D:\Desktop\codex-autopilot\codex-autopilot.ps1
 ```
 
-To persist the latest autopilot run state for recovery tooling or a future dashboard, pass `-RunStateFile`:
+To persist the latest autopilot run state and resume an interrupted loop, pass `-RunStateFile`:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File D:\Desktop\codex-autopilot\codex-autopilot.ps1 -RunStateFile D:\Desktop\codex-autopilot\run-state.json
 ```
 
-The state file records the session id, working directory, latest turn, stop reason, last exit code, stall-recovery flag, and a hash/length of the last assistant message.
+The state file records the session id, working directory, latest turn, stop reason, last exit code, stall-recovery flag, and a hash/length of the last assistant message. On the next run with the same `-RunStateFile`, matching session and working-directory state resumes from the next turn when the previous stop reason was `loop_continue`. Completed max-turn state is treated as already finished when the recorded turn is greater than or equal to the current `-MaxTurns`; increasing `-MaxTurns` continues from the next turn. Invalid JSON, invalid numeric fields, session mismatch, and working-directory mismatch are ignored and start from turn 1. To force a fresh run, delete the state file or pass a different `-RunStateFile`.
 
 By default, Codex still runs with the legacy low-friction `--yolo` behavior. To use safer execution settings, choose an explicit execution mode:
 
