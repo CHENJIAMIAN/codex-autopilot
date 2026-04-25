@@ -28,6 +28,14 @@ If you do not pass `-ResumePrompt`, the script will first show a prompt picker. 
 powershell -ExecutionPolicy Bypass -File D:\Desktop\codex-autopilot\codex-autopilot.ps1
 ```
 
+To persist the latest autopilot run state for recovery tooling or a future dashboard, pass `-RunStateFile`:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File D:\Desktop\codex-autopilot\codex-autopilot.ps1 -RunStateFile D:\Desktop\codex-autopilot\run-state.json
+```
+
+The state file records the session id, working directory, latest turn, stop reason, last exit code, stall-recovery flag, and a hash/length of the last assistant message.
+
 ## Verification
 
 ```powershell

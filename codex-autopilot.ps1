@@ -8,7 +8,8 @@ param(
     [string]$ResumePrompt,
     [string]$SessionsDir = (Join-Path $HOME ".codex\sessions"),
     [string]$SessionId,
-    [int]$SessionLimit = 30
+    [int]$SessionLimit = 30,
+    [string]$RunStateFile
 )
 
 $ErrorActionPreference = "Stop"
@@ -92,6 +93,67 @@ function Write-AutopilotLog {
 
     $line = "{0} {1}" -f ([DateTimeOffset]::Now.ToString("o")), $Message
     [System.IO.File]::AppendAllText($Path, $line + [Environment]::NewLine, $script:Utf8Encoding)
+}
+
+function Get-TextSha256 {
+    param([AllowNull()][string]$Text)
+
+    if ($null -eq $Text) {
+        $Text = ""
+    }
+
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = $script:Utf8Encoding.GetBytes($Text)
+        $hashBytes = $sha256.ComputeHash($bytes)
+        return (($hashBytes | ForEach-Object { $_.ToString("x2") }) -join "")
+    }
+    finally {
+        $sha256.Dispose()
+    }
+}
+
+function Write-AutopilotRunState {
+    param(
+        [string]$Path,
+        [int]$Turn,
+        [int]$MaxTurns,
+        [int]$LastExitCode,
+        [string]$StopReason = "",
+        [string]$SessionId,
+        [string]$WorkingDirectory,
+        [string]$LastMessage = "",
+        [bool]$StallRecovered = $false
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return
+    }
+
+    $directory = Split-Path -Path $Path -Parent
+    if (-not [string]::IsNullOrWhiteSpace($directory) -and -not (Test-Path -LiteralPath $directory)) {
+        New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    }
+
+    if ($null -eq $LastMessage) {
+        $LastMessage = ""
+    }
+
+    $state = [ordered]@{
+        updated_at = [DateTimeOffset]::Now.ToString("o")
+        session_id = $(if ($SessionId) { $SessionId } else { "" })
+        working_directory = $(if ($WorkingDirectory) { $WorkingDirectory } else { "" })
+        turn = $Turn
+        max_turns = $MaxTurns
+        last_exit_code = $LastExitCode
+        stop_reason = $StopReason
+        stall_recovered = $StallRecovered
+        last_message_length = $LastMessage.Length
+        last_message_sha256 = Get-TextSha256 -Text $LastMessage
+    }
+
+    $json = $state | ConvertTo-Json -Depth 4
+    [System.IO.File]::WriteAllText($Path, $json + [Environment]::NewLine, $script:Utf8Encoding)
 }
 
 function Invoke-FzfSelection {
@@ -800,7 +862,8 @@ function Invoke-CodexAutopilot {
         [int]$LastMessageStableSeconds = 30,
         [Parameter(Mandatory = $true)][string]$ResumePrompt,
         [string]$SessionId,
-        [string]$WorkingDirectory
+        [string]$WorkingDirectory,
+        [string]$RunStateFile
     )
 
     $turn = 0
@@ -841,9 +904,11 @@ function Invoke-CodexAutopilot {
 
         if ($commandResult -is [int]) {
             $exitCode = [int]$commandResult
+            $stallRecovered = $false
         }
         elseif ($null -ne $commandResult -and $commandResult.PSObject.Properties.Name -contains "ExitCode") {
             $exitCode = [int]$commandResult.ExitCode
+            $stallRecovered = ($commandResult.PSObject.Properties.Name -contains "StallRecovered" -and [bool]$commandResult.StallRecovered)
         }
         else {
             throw "Invoke-CodexCommand returned an unsupported result."
@@ -854,6 +919,7 @@ function Invoke-CodexAutopilot {
         if ($exitCode -ne 0) {
             Set-WindowTitle -Title (Get-WindowTitle -Phase "Failed" -ExitCode $exitCode)
             Write-AutopilotLog -Path $LogFile -Message ("event=stop reason=exec_exit_nonzero turn={0} exit_code={1}" -f $turn, $exitCode)
+            Write-AutopilotRunState -Path $RunStateFile -Turn $turn -MaxTurns $MaxTurns -LastExitCode $exitCode -StopReason "exec_exit_nonzero" -SessionId $SessionId -WorkingDirectory $WorkingDirectory -LastMessage "" -StallRecovered $stallRecovered
             Write-Host ($script:Ui.ExecExitCode -f $exitCode) -ForegroundColor Yellow
             return $exitCode
         }
@@ -870,6 +936,7 @@ function Invoke-CodexAutopilot {
 
         Write-Host (Get-TurnBanner -Turn $turn -MaxTurns $MaxTurns -Phase "End") -ForegroundColor DarkCyan
         Write-AutopilotLog -Path $LogFile -Message ("event=turn_end turn={0} exit_code={1}" -f $turn, $exitCode)
+        Write-AutopilotRunState -Path $RunStateFile -Turn $turn -MaxTurns $MaxTurns -LastExitCode $exitCode -StopReason $(if ($turn -lt $MaxTurns) { "loop_continue" } else { "" }) -SessionId $SessionId -WorkingDirectory $WorkingDirectory -LastMessage $lastMessage -StallRecovered $stallRecovered
 
         Write-AutopilotLog -Path $LogFile -Message ("event=sleep_start turn={0} seconds={1}" -f $turn, $SleepSeconds)
         Start-Sleep -Seconds $SleepSeconds
@@ -881,6 +948,7 @@ function Invoke-CodexAutopilot {
 
     Set-WindowTitle -Title (Get-WindowTitle -Phase "Completed")
     Write-AutopilotLog -Path $LogFile -Message ("event=stop reason=max_turns_reached turn={0} exit_code=0" -f $turn)
+    Write-AutopilotRunState -Path $RunStateFile -Turn $turn -MaxTurns $MaxTurns -LastExitCode 0 -StopReason "max_turns_reached" -SessionId $SessionId -WorkingDirectory $WorkingDirectory -LastMessage $lastMessage -StallRecovered $stallRecovered
     Write-Host ($script:Ui.MaxTurnsReached -f $MaxTurns) -ForegroundColor Yellow
     return 0
 }
@@ -891,6 +959,6 @@ if ($env:CODEX_AUTOPILOT_IMPORT_ONLY -ne "1") {
     if (-not $PSBoundParameters.ContainsKey("ResumePrompt")) {
         $ResumePrompt = Select-ResumePrompt
     }
-    $exitCode = Invoke-CodexAutopilot -MaxTurns $MaxTurns -SleepSeconds $SleepSeconds -LastMessageFile $LastMessageFile -LogFile $LogFile -TurnStallTimeoutSeconds $TurnStallTimeoutSeconds -LastMessageStableSeconds $LastMessageStableSeconds -ResumePrompt $ResumePrompt -SessionId $sessionContext.SessionId -WorkingDirectory $sessionContext.WorkingDirectory
+    $exitCode = Invoke-CodexAutopilot -MaxTurns $MaxTurns -SleepSeconds $SleepSeconds -LastMessageFile $LastMessageFile -LogFile $LogFile -TurnStallTimeoutSeconds $TurnStallTimeoutSeconds -LastMessageStableSeconds $LastMessageStableSeconds -ResumePrompt $ResumePrompt -SessionId $sessionContext.SessionId -WorkingDirectory $sessionContext.WorkingDirectory -RunStateFile $RunStateFile
     exit $exitCode
 }

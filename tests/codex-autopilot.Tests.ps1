@@ -671,7 +671,7 @@ Describe "Invoke-CodexAutopilot" {
 
             $exitCode | Should Be 0
             Assert-MockCalled Invoke-CodexCommand -Times 1
-            $script:CapturedCodexWorkingDirectory | Should Be $workingDirectory
+            Split-Path -Path $script:CapturedCodexWorkingDirectory -Leaf | Should Be "resumed-project"
         }
         finally {
             Pop-Location
@@ -835,6 +835,30 @@ Describe "Invoke-CodexAutopilot" {
         $exitCode | Should Be 0
         Assert-MockCalled Invoke-CodexCommand -Times 2
         (Read-TextFileUtf8 -Path $logPath) | Should Match 'event=loop_continue next_turn=2'
+    }
+
+    It "writes a run state file with the latest turn and stop reason" {
+        $lastMessagePath = Join-Path $TestDrive "last-message-state.txt"
+        $runStatePath = Join-Path $TestDrive "run-state.json"
+        Set-Content -LiteralPath $lastMessagePath -Value "stateful answer"
+
+        Mock Get-CodexExecArgumentList { return @("exec") }
+        Mock Invoke-CodexCommand { return 0 }
+        Mock Start-Sleep {}
+        Mock Set-WindowTitle {}
+
+        $exitCode = Invoke-CodexAutopilot -MaxTurns 1 -SleepSeconds 0 -LastMessageFile $lastMessagePath -ResumePrompt "Continue" -SessionId "ffffffff-ffff-ffff-ffff-ffffffffffff" -WorkingDirectory $TestDrive -RunStateFile $runStatePath
+
+        $exitCode | Should Be 0
+        Test-Path -LiteralPath $runStatePath | Should Be $true
+        $state = Get-Content -LiteralPath $runStatePath -Raw | ConvertFrom-Json
+        $state.session_id | Should Be "ffffffff-ffff-ffff-ffff-ffffffffffff"
+        $state.turn | Should Be 1
+        $state.max_turns | Should Be 1
+        $state.last_exit_code | Should Be 0
+        $state.stop_reason | Should Be "max_turns_reached"
+        $state.last_message_length | Should Be (Read-TextFileUtf8 -Path $lastMessagePath).Length
+        $state.working_directory.Trim() | Should Be ([string]$TestDrive).Trim()
     }
 }
 Describe "Initialize-ConsoleUtf8" {
