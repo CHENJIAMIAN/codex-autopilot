@@ -47,6 +47,12 @@ Describe "Localized prompts" {
     }
 }
 
+Describe "Default paths" {
+    It "uses a script-local default run state file" {
+        $RunStateFile | Should Be "D:\Desktop\codex-autopilot\run-state.json"
+    }
+}
+
 Describe "Get-CodexExecArgumentList" {
     It "places the output file flag before the resume subcommand" {
         $args = Get-CodexExecArgumentList -LastMessageFile "C:\Temp\last.txt" -ResumePrompt "Continue executing."

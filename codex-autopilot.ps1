@@ -11,7 +11,7 @@ param(
     [string]$SessionsDir = (Join-Path $HOME ".codex\sessions"),
     [string]$SessionId,
     [int]$SessionLimit = 30,
-    [string]$RunStateFile,
+    [string]$RunStateFile = (Join-Path $PSScriptRoot "run-state.json"),
     [ValidateSet("yolo", "full-auto", "sandbox")][string]$CodexExecutionMode = "yolo",
     [ValidateSet("read-only", "workspace-write", "danger-full-access")][string]$CodexSandboxMode = "workspace-write",
     [string]$CodexProfile

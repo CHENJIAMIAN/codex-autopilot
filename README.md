@@ -28,7 +28,7 @@ If you do not pass `-ResumePrompt`, the script will first show a prompt picker. 
 powershell -ExecutionPolicy Bypass -File D:\Desktop\codex-autopilot\codex-autopilot.ps1
 ```
 
-To persist the latest autopilot run state and resume an interrupted loop, pass `-RunStateFile`:
+By default, the latest autopilot run state is persisted next to the script at `D:\Desktop\codex-autopilot\run-state.json`. To use a different state file, pass `-RunStateFile`:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File D:\Desktop\codex-autopilot\codex-autopilot.ps1 -RunStateFile D:\Desktop\codex-autopilot\run-state.json
