@@ -36,6 +36,15 @@ powershell -ExecutionPolicy Bypass -File D:\Desktop\codex-autopilot\codex-autopi
 
 The state file records the session id, working directory, latest turn, stop reason, last exit code, stall-recovery flag, and a hash/length of the last assistant message.
 
+By default, Codex still runs with the legacy low-friction `--yolo` behavior. To use safer execution settings, choose an explicit execution mode:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File D:\Desktop\codex-autopilot\codex-autopilot.ps1 -CodexExecutionMode full-auto
+powershell -ExecutionPolicy Bypass -File D:\Desktop\codex-autopilot\codex-autopilot.ps1 -CodexExecutionMode sandbox -CodexSandboxMode workspace-write -CodexProfile safe-defaults
+```
+
+Supported `-CodexExecutionMode` values are `yolo`, `full-auto`, and `sandbox`. Supported `-CodexSandboxMode` values are `read-only`, `workspace-write`, and `danger-full-access`.
+
 ## Verification
 
 ```powershell

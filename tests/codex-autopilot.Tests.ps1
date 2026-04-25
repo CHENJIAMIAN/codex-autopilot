@@ -75,6 +75,37 @@ Describe "Get-CodexExecArgumentList" {
             "Continue executing."
         )
     }
+
+    It "can use full-auto execution instead of yolo" {
+        $args = Get-CodexExecArgumentList -LastMessageFile "C:\Temp\last.txt" -ResumePrompt "Continue executing." -CodexExecutionMode "full-auto"
+
+        $args | Should Be @(
+            "exec",
+            "--full-auto",
+            "-o",
+            "C:\Temp\last.txt",
+            "resume",
+            "--last",
+            "Continue executing."
+        )
+    }
+
+    It "can use an explicit sandbox and profile instead of yolo" {
+        $args = Get-CodexExecArgumentList -LastMessageFile "C:\Temp\last.txt" -ResumePrompt "Continue executing." -CodexExecutionMode "sandbox" -CodexSandboxMode "workspace-write" -CodexProfile "safe-defaults"
+
+        $args | Should Be @(
+            "exec",
+            "--profile",
+            "safe-defaults",
+            "--sandbox",
+            "workspace-write",
+            "-o",
+            "C:\Temp\last.txt",
+            "resume",
+            "--last",
+            "Continue executing."
+        )
+    }
 }
 
 Describe "Get-CodexExecutablePath" {

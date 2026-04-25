@@ -9,7 +9,10 @@ param(
     [string]$SessionsDir = (Join-Path $HOME ".codex\sessions"),
     [string]$SessionId,
     [int]$SessionLimit = 30,
-    [string]$RunStateFile
+    [string]$RunStateFile,
+    [ValidateSet("yolo", "full-auto", "sandbox")][string]$CodexExecutionMode = "yolo",
+    [ValidateSet("read-only", "workspace-write", "danger-full-access")][string]$CodexSandboxMode = "workspace-write",
+    [string]$CodexProfile
 )
 
 $ErrorActionPreference = "Stop"
@@ -316,7 +319,10 @@ function Get-CodexExecArgumentList {
     param(
         [Parameter(Mandatory = $true)][string]$LastMessageFile,
         [string]$ResumePrompt,
-        [string]$SessionId
+        [string]$SessionId,
+        [ValidateSet("yolo", "full-auto", "sandbox")][string]$CodexExecutionMode = "yolo",
+        [ValidateSet("read-only", "workspace-write", "danger-full-access")][string]$CodexSandboxMode = "workspace-write",
+        [string]$CodexProfile
     )
 
     $resumeArgs = if ($SessionId) {
@@ -326,12 +332,25 @@ function Get-CodexExecArgumentList {
         @("resume", "--last", $ResumePrompt)
     }
 
-    return @(
-        "exec",
-        "--yolo",
-        "-o",
-        $LastMessageFile
-    ) + $resumeArgs
+    $args = @("exec")
+
+    if (-not [string]::IsNullOrWhiteSpace($CodexProfile)) {
+        $args += @("--profile", $CodexProfile)
+    }
+
+    switch ($CodexExecutionMode) {
+        "full-auto" {
+            $args += "--full-auto"
+        }
+        "sandbox" {
+            $args += @("--sandbox", $CodexSandboxMode)
+        }
+        default {
+            $args += "--yolo"
+        }
+    }
+
+    return $args + @("-o", $LastMessageFile) + $resumeArgs
 }
 
 function Select-ResumePrompt {
@@ -863,7 +882,10 @@ function Invoke-CodexAutopilot {
         [Parameter(Mandatory = $true)][string]$ResumePrompt,
         [string]$SessionId,
         [string]$WorkingDirectory,
-        [string]$RunStateFile
+        [string]$RunStateFile,
+        [ValidateSet("yolo", "full-auto", "sandbox")][string]$CodexExecutionMode = "yolo",
+        [ValidateSet("read-only", "workspace-write", "danger-full-access")][string]$CodexSandboxMode = "workspace-write",
+        [string]$CodexProfile
     )
 
     $turn = 0
@@ -874,7 +896,7 @@ function Invoke-CodexAutopilot {
         Write-Host ""
         Write-Host (Get-TurnBanner -Turn $turn -MaxTurns $MaxTurns -Phase "Begin") -ForegroundColor Cyan
 
-        $args = Get-CodexExecArgumentList -LastMessageFile $LastMessageFile -ResumePrompt $ResumePrompt -SessionId $SessionId
+        $args = Get-CodexExecArgumentList -LastMessageFile $LastMessageFile -ResumePrompt $ResumePrompt -SessionId $SessionId -CodexExecutionMode $CodexExecutionMode -CodexSandboxMode $CodexSandboxMode -CodexProfile $CodexProfile
         Write-AutopilotLog -Path $LogFile -Message ("event=exec_invoke turn={0} command={1}" -f $turn, ((Get-CodexExecutablePath), ($args -join ' ') -join ' '))
         $runningTitle = Get-WindowTitle -Phase "Running" -Turn $turn -MaxTurns $MaxTurns
         if ($WorkingDirectory) {
@@ -959,6 +981,6 @@ if ($env:CODEX_AUTOPILOT_IMPORT_ONLY -ne "1") {
     if (-not $PSBoundParameters.ContainsKey("ResumePrompt")) {
         $ResumePrompt = Select-ResumePrompt
     }
-    $exitCode = Invoke-CodexAutopilot -MaxTurns $MaxTurns -SleepSeconds $SleepSeconds -LastMessageFile $LastMessageFile -LogFile $LogFile -TurnStallTimeoutSeconds $TurnStallTimeoutSeconds -LastMessageStableSeconds $LastMessageStableSeconds -ResumePrompt $ResumePrompt -SessionId $sessionContext.SessionId -WorkingDirectory $sessionContext.WorkingDirectory -RunStateFile $RunStateFile
+    $exitCode = Invoke-CodexAutopilot -MaxTurns $MaxTurns -SleepSeconds $SleepSeconds -LastMessageFile $LastMessageFile -LogFile $LogFile -TurnStallTimeoutSeconds $TurnStallTimeoutSeconds -LastMessageStableSeconds $LastMessageStableSeconds -ResumePrompt $ResumePrompt -SessionId $sessionContext.SessionId -WorkingDirectory $sessionContext.WorkingDirectory -RunStateFile $RunStateFile -CodexExecutionMode $CodexExecutionMode -CodexSandboxMode $CodexSandboxMode -CodexProfile $CodexProfile
     exit $exitCode
 }
