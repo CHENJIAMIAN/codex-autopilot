@@ -817,6 +817,69 @@ Describe "Invoke-CodexAutopilot" {
         $logText | Should Match 'event=stop reason=exec_exit_nonzero turn=1 exit_code=12'
     }
 
+    It "retries a non-zero exit on the same turn when retries are configured" {
+        $lastMessagePath = Join-Path $TestDrive "last-message-retry-success.txt"
+        $logPath = Join-Path $TestDrive "autopilot-retry-success.log"
+        Set-Content -LiteralPath $lastMessagePath -Value "retry recovered"
+        $script:CommandExitCodes = @(12, 0)
+
+        Mock Get-CodexExecArgumentList { return @("exec") }
+        Mock Invoke-CodexCommand {
+            $next = $script:CommandExitCodes[0]
+            if ($script:CommandExitCodes.Count -eq 1) {
+                $script:CommandExitCodes = @()
+            }
+            else {
+                $script:CommandExitCodes = $script:CommandExitCodes[1..($script:CommandExitCodes.Count - 1)]
+            }
+            return $next
+        }
+        Mock Start-Sleep {}
+        Mock Set-WindowTitle {}
+
+        $exitCode = Invoke-CodexAutopilot -MaxTurns 1 -SleepSeconds 0 -RetryCount 1 -RetryDelaySeconds 0 -LastMessageFile $lastMessagePath -ResumePrompt "Continue" -SessionId "ffffffff-ffff-ffff-ffff-ffffffffffff" -LogFile $logPath
+
+        $exitCode | Should Be 0
+        Assert-MockCalled Invoke-CodexCommand -Times 2
+        $logText = Read-TextFileUtf8 -Path $logPath
+        $logText | Should Match 'event=exec_retry turn=1 attempt=1 max_retries=1 exit_code=12 failure_class=exec_exit_nonzero delay_seconds=0'
+        $logText | Should Not Match 'event=stop reason=exec_exit_nonzero'
+        $logText | Should Match 'event=stop reason=max_turns_reached turn=1 exit_code=0'
+    }
+
+    It "returns the last exit code when retries are exhausted" {
+        $lastMessagePath = Join-Path $TestDrive "last-message-retry-exhausted.txt"
+        $runStatePath = Join-Path $TestDrive "run-state-retry-exhausted.json"
+        $logPath = Join-Path $TestDrive "autopilot-retry-exhausted.log"
+        Set-Content -LiteralPath $lastMessagePath -Value ""
+        $script:CommandExitCodes = @(12, 13)
+
+        Mock Get-CodexExecArgumentList { return @("exec") }
+        Mock Invoke-CodexCommand {
+            $next = $script:CommandExitCodes[0]
+            if ($script:CommandExitCodes.Count -eq 1) {
+                $script:CommandExitCodes = @()
+            }
+            else {
+                $script:CommandExitCodes = $script:CommandExitCodes[1..($script:CommandExitCodes.Count - 1)]
+            }
+            return $next
+        }
+        Mock Start-Sleep {}
+        Mock Set-WindowTitle {}
+
+        $exitCode = Invoke-CodexAutopilot -MaxTurns 1 -SleepSeconds 0 -RetryCount 1 -RetryDelaySeconds 0 -LastMessageFile $lastMessagePath -ResumePrompt "Continue" -SessionId "ffffffff-ffff-ffff-ffff-ffffffffffff" -LogFile $logPath -RunStateFile $runStatePath
+
+        $exitCode | Should Be 13
+        Assert-MockCalled Invoke-CodexCommand -Times 2
+        $logText = Read-TextFileUtf8 -Path $logPath
+        $logText | Should Match 'event=exec_retry turn=1 attempt=1 max_retries=1 exit_code=12 failure_class=exec_exit_nonzero delay_seconds=0'
+        $logText | Should Match 'event=stop reason=exec_retry_exhausted turn=1 exit_code=13'
+        $state = Get-Content -LiteralPath $runStatePath -Raw | ConvertFrom-Json
+        $state.last_exit_code | Should Be 13
+        $state.stop_reason | Should Be "exec_retry_exhausted"
+    }
+
     It "logs codex execution exceptions before rethrowing" {
         $lastMessagePath = Join-Path $TestDrive "last-message-exception.txt"
         $logPath = Join-Path $TestDrive "autopilot-exception.log"

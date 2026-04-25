@@ -1,6 +1,8 @@
 param(
     [int]$MaxTurns = 50,
     [int]$SleepSeconds = 3,
+    [int]$RetryCount = 0,
+    [int]$RetryDelaySeconds = 5,
     [string]$LastMessageFile = (Join-Path $env:TEMP "codex_last_msg.txt"),
     [string]$LogFile = (Join-Path $PSScriptRoot "codex-autopilot.log"),
     [int]$TurnStallTimeoutSeconds = 1800,
@@ -1023,6 +1025,8 @@ function Invoke-CodexAutopilot {
     param(
         [int]$MaxTurns = 50,
         [int]$SleepSeconds = 3,
+        [int]$RetryCount = 0,
+        [int]$RetryDelaySeconds = 5,
         [Parameter(Mandatory = $true)][string]$LastMessageFile,
         [string]$LogFile = (Join-Path $PSScriptRoot "codex-autopilot.log"),
         [int]$TurnStallTimeoutSeconds = 1800,
@@ -1053,9 +1057,24 @@ function Invoke-CodexAutopilot {
         $args = Get-CodexExecArgumentList -LastMessageFile $LastMessageFile -ResumePrompt $ResumePrompt -SessionId $SessionId -CodexExecutionMode $CodexExecutionMode -CodexSandboxMode $CodexSandboxMode -CodexProfile $CodexProfile
         Write-AutopilotLog -Path $LogFile -Message ("event=exec_invoke turn={0} command={1}" -f $turn, ((Get-CodexExecutablePath), ($args -join ' ') -join ' '))
         $runningTitle = Get-WindowTitle -Phase "Running" -Turn $turn -MaxTurns $MaxTurns
-        if ($WorkingDirectory) {
-            Push-Location -LiteralPath $WorkingDirectory
-            try {
+        $attempt = 0
+        do {
+            if ($WorkingDirectory) {
+                Push-Location -LiteralPath $WorkingDirectory
+                try {
+                    try {
+                        $commandResult = Invoke-CodexCommand -ArgumentList $args -WindowTitle $runningTitle -TurnStallTimeoutSeconds $TurnStallTimeoutSeconds -LastMessageFile $LastMessageFile -LastMessageStableSeconds $LastMessageStableSeconds -LogFile $LogFile -Turn $turn
+                    }
+                    catch {
+                        Write-AutopilotLog -Path $LogFile -Message ("event=exec_exception turn={0} message={1}" -f $turn, $_.Exception.Message)
+                        throw
+                    }
+                }
+                finally {
+                    Pop-Location
+                }
+            }
+            else {
                 try {
                     $commandResult = Invoke-CodexCommand -ArgumentList $args -WindowTitle $runningTitle -TurnStallTimeoutSeconds $TurnStallTimeoutSeconds -LastMessageFile $LastMessageFile -LastMessageStableSeconds $LastMessageStableSeconds -LogFile $LogFile -Turn $turn
                 }
@@ -1064,38 +1083,37 @@ function Invoke-CodexAutopilot {
                     throw
                 }
             }
-            finally {
-                Pop-Location
-            }
-        }
-        else {
-            try {
-                $commandResult = Invoke-CodexCommand -ArgumentList $args -WindowTitle $runningTitle -TurnStallTimeoutSeconds $TurnStallTimeoutSeconds -LastMessageFile $LastMessageFile -LastMessageStableSeconds $LastMessageStableSeconds -LogFile $LogFile -Turn $turn
-            }
-            catch {
-                Write-AutopilotLog -Path $LogFile -Message ("event=exec_exception turn={0} message={1}" -f $turn, $_.Exception.Message)
-                throw
-            }
-        }
 
-        if ($commandResult -is [int]) {
-            $exitCode = [int]$commandResult
-            $stallRecovered = $false
-        }
-        elseif ($null -ne $commandResult -and $commandResult.PSObject.Properties.Name -contains "ExitCode") {
-            $exitCode = [int]$commandResult.ExitCode
-            $stallRecovered = ($commandResult.PSObject.Properties.Name -contains "StallRecovered" -and [bool]$commandResult.StallRecovered)
-        }
-        else {
-            throw "Invoke-CodexCommand returned an unsupported result."
-        }
+            if ($commandResult -is [int]) {
+                $exitCode = [int]$commandResult
+                $stallRecovered = $false
+            }
+            elseif ($null -ne $commandResult -and $commandResult.PSObject.Properties.Name -contains "ExitCode") {
+                $exitCode = [int]$commandResult.ExitCode
+                $stallRecovered = ($commandResult.PSObject.Properties.Name -contains "StallRecovered" -and [bool]$commandResult.StallRecovered)
+            }
+            else {
+                throw "Invoke-CodexCommand returned an unsupported result."
+            }
 
-        Write-AutopilotLog -Path $LogFile -Message ("event=exec_exit turn={0} exit_code={1}" -f $turn, $exitCode)
+            Write-AutopilotLog -Path $LogFile -Message ("event=exec_exit turn={0} exit_code={1}" -f $turn, $exitCode)
+            if ($exitCode -ne 0 -and $attempt -lt $RetryCount) {
+                $attempt += 1
+                Write-AutopilotLog -Path $LogFile -Message ("event=exec_retry turn={0} attempt={1} max_retries={2} exit_code={3} failure_class=exec_exit_nonzero delay_seconds={4}" -f $turn, $attempt, $RetryCount, $exitCode, $RetryDelaySeconds)
+                if ($RetryDelaySeconds -gt 0) {
+                    Start-Sleep -Seconds $RetryDelaySeconds
+                }
+            }
+            else {
+                break
+            }
+        } while ($true)
 
         if ($exitCode -ne 0) {
+            $stopReason = if ($RetryCount -gt 0) { "exec_retry_exhausted" } else { "exec_exit_nonzero" }
             Set-WindowTitle -Title (Get-WindowTitle -Phase "Failed" -ExitCode $exitCode)
-            Write-AutopilotLog -Path $LogFile -Message ("event=stop reason=exec_exit_nonzero turn={0} exit_code={1}" -f $turn, $exitCode)
-            Write-AutopilotRunState -Path $RunStateFile -Turn $turn -MaxTurns $MaxTurns -LastExitCode $exitCode -StopReason "exec_exit_nonzero" -SessionId $SessionId -WorkingDirectory $WorkingDirectory -LastMessage "" -StallRecovered $stallRecovered
+            Write-AutopilotLog -Path $LogFile -Message ("event=stop reason={0} turn={1} exit_code={2}" -f $stopReason, $turn, $exitCode)
+            Write-AutopilotRunState -Path $RunStateFile -Turn $turn -MaxTurns $MaxTurns -LastExitCode $exitCode -StopReason $stopReason -SessionId $SessionId -WorkingDirectory $WorkingDirectory -LastMessage "" -StallRecovered $stallRecovered
             Write-Host ($script:Ui.ExecExitCode -f $exitCode) -ForegroundColor Yellow
             return $exitCode
         }
@@ -1135,6 +1153,6 @@ if ($env:CODEX_AUTOPILOT_IMPORT_ONLY -ne "1") {
     if (-not $PSBoundParameters.ContainsKey("ResumePrompt")) {
         $ResumePrompt = Select-ResumePrompt
     }
-    $exitCode = Invoke-CodexAutopilot -MaxTurns $MaxTurns -SleepSeconds $SleepSeconds -LastMessageFile $LastMessageFile -LogFile $LogFile -TurnStallTimeoutSeconds $TurnStallTimeoutSeconds -LastMessageStableSeconds $LastMessageStableSeconds -ResumePrompt $ResumePrompt -SessionId $sessionContext.SessionId -WorkingDirectory $sessionContext.WorkingDirectory -RunStateFile $RunStateFile -CodexExecutionMode $CodexExecutionMode -CodexSandboxMode $CodexSandboxMode -CodexProfile $CodexProfile
+    $exitCode = Invoke-CodexAutopilot -MaxTurns $MaxTurns -SleepSeconds $SleepSeconds -RetryCount $RetryCount -RetryDelaySeconds $RetryDelaySeconds -LastMessageFile $LastMessageFile -LogFile $LogFile -TurnStallTimeoutSeconds $TurnStallTimeoutSeconds -LastMessageStableSeconds $LastMessageStableSeconds -ResumePrompt $ResumePrompt -SessionId $sessionContext.SessionId -WorkingDirectory $sessionContext.WorkingDirectory -RunStateFile $RunStateFile -CodexExecutionMode $CodexExecutionMode -CodexSandboxMode $CodexSandboxMode -CodexProfile $CodexProfile
     exit $exitCode
 }

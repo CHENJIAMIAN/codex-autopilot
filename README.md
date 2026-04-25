@@ -36,6 +36,14 @@ powershell -ExecutionPolicy Bypass -File D:\Desktop\codex-autopilot\codex-autopi
 
 The state file records the session id, working directory, latest turn, stop reason, last exit code, stall-recovery flag, and a hash/length of the last assistant message. State writes use a same-directory temp file and replace the destination after the new JSON is written. On the next run with the same `-RunStateFile`, matching session and working-directory state resumes from the next turn when the previous stop reason was `loop_continue`. Completed max-turn state is treated as already finished when the recorded turn is greater than or equal to the current `-MaxTurns`; increasing `-MaxTurns` continues from the next turn. Invalid JSON, invalid numeric fields, session mismatch, and working-directory mismatch are ignored and start from turn 1. To force a fresh run, delete the state file or pass a different `-RunStateFile`.
 
+To retry transient non-zero `codex exec` exits within the same turn, pass `-RetryCount` and optionally `-RetryDelaySeconds`:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File D:\Desktop\codex-autopilot\codex-autopilot.ps1 -RetryCount 2 -RetryDelaySeconds 10
+```
+
+Retries do not consume additional turn budget. Each failed attempt logs `event=exec_retry` with `failure_class=exec_exit_nonzero`. If all retries are exhausted, the run returns the last exit code and writes `stop_reason=exec_retry_exhausted`; when `-RetryCount` is not set, the legacy `stop_reason=exec_exit_nonzero` behavior is preserved.
+
 By default, Codex still runs with the legacy low-friction `--yolo` behavior. To use safer execution settings, choose an explicit execution mode:
 
 ```powershell
