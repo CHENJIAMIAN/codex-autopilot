@@ -692,6 +692,64 @@ Describe "Resolve-SessionContext" {
         $context.WorkingDirectory | Should Be "D:\Desktop\picked-project"
     }
 
+    It "loads all sessions for the picker when fzf is available" {
+        $entries = @(
+            [PSCustomObject]@{
+                SessionId = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
+                Timestamp = "2026-04-15T10-00-00"
+                Preview = "pick me"
+                Path = "D:\fake\rollout.jsonl"
+                LastWriteTime = [datetime]"2026-04-15T10:00:00"
+                WorkingDirectory = "D:\Desktop\picked-project"
+            }
+        )
+        $script:CapturedMaxCount = $null
+
+        Mock Get-Command {
+            [pscustomobject]@{
+                Source = "fake-fzf"
+            }
+        } -ParameterFilter { $Name -eq "fzf" }
+        Mock Select-CodexSession { return $entries[0] }
+        Mock Get-CodexSessionEntries {
+            param([string]$SessionsDir, [int]$MaxCount)
+            $script:CapturedMaxCount = $MaxCount
+            return $entries
+        }
+
+        $context = Resolve-SessionContext -SessionsDir "D:\fake\sessions" -SessionLimit 10
+
+        $context.SessionId | Should Be "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
+        $script:CapturedMaxCount | Should Be 2147483647
+    }
+
+    It "keeps the configured session limit when fzf is unavailable" {
+        $entries = @(
+            [PSCustomObject]@{
+                SessionId = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
+                Timestamp = "2026-04-15T10-00-00"
+                Preview = "pick me"
+                Path = "D:\fake\rollout.jsonl"
+                LastWriteTime = [datetime]"2026-04-15T10:00:00"
+                WorkingDirectory = "D:\Desktop\picked-project"
+            }
+        )
+        $script:CapturedMaxCount = $null
+
+        Mock Get-Command { $null } -ParameterFilter { $Name -eq "fzf" }
+        Mock Select-CodexSession { return $entries[0] }
+        Mock Get-CodexSessionEntries {
+            param([string]$SessionsDir, [int]$MaxCount)
+            $script:CapturedMaxCount = $MaxCount
+            return $entries
+        }
+
+        $context = Resolve-SessionContext -SessionsDir "D:\fake\sessions" -SessionLimit 10
+
+        $context.SessionId | Should Be "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
+        $script:CapturedMaxCount | Should Be 10
+    }
+
     It "throws when a selected session id has no working directory" {
         $sessionsRoot = Join-Path $TestDrive "case6\\.codex\\sessions"
         $dayPath = Join-Path $sessionsRoot "2026\\04\\15"
@@ -778,7 +836,7 @@ Describe "Get-SessionPreviewFromRollout" {
 }
 
 Describe "Get-CodexSessionEntries" {
-    It "lists recent rollout files with parsed metadata" {
+    It "lists sessions ordered by last use time and exposes that time in the display timestamp" {
         $sessionsRoot = Join-Path $TestDrive "case1\\.codex\\sessions"
         $dayPath = Join-Path $sessionsRoot "2026\\04\\14"
         New-Item -ItemType Directory -Path $dayPath -Force | Out-Null
@@ -793,13 +851,16 @@ Describe "Get-CodexSessionEntries" {
 {"timestamp":"2026-04-14T11:30:12.807Z","type":"session_meta","payload":{"id":"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb","cwd":"D:\\Desktop\\new","agent_role":"default"}}
 {"timestamp":"2026-04-14T11:30:13.000Z","type":"event_msg","payload":{"type":"user_message","message":"newer"}}
 '@
+        (Get-Item -LiteralPath $oldPath).LastWriteTime = [datetime]"2026-04-14T21:00:00"
+        (Get-Item -LiteralPath $newPath).LastWriteTime = [datetime]"2026-04-14T20:00:00"
 
         $entries = @(Get-CodexSessionEntries -SessionsDir $sessionsRoot -MaxCount 10)
 
         $entries.Count | Should Be 2
-        $entries[0].SessionId | Should Be "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
-        $entries[0].Preview | Should Be "newer"
-        $entries[1].SessionId | Should Be "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        $entries[0].SessionId | Should Be "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        $entries[0].Preview | Should Be "older"
+        $entries[0].Timestamp | Should Be "2026-04-14 21:00:00"
+        $entries[1].SessionId | Should Be "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
     }
 
     It "falls back to cwd when a primary session has no user preview" {

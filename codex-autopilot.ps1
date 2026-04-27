@@ -822,6 +822,12 @@ function Get-SessionTimestampFromRolloutPath {
     return $fileName.Substring($prefixLength, $timestampLength)
 }
 
+function Format-SessionLastUsedTime {
+    param([Parameter(Mandatory = $true)][datetime]$LastWriteTime)
+
+    return $LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss")
+}
+
 function Get-SessionMetaPayloadFromRollout {
     param([Parameter(Mandatory = $true)][string]$Path)
 
@@ -955,9 +961,9 @@ function Get-CodexSessionEntries {
 
     $files = @(Get-ChildItem -LiteralPath $SessionsDir -Recurse -File -Filter "rollout-*.jsonl" |
         Sort-Object `
+            @{ Expression = { $_.LastWriteTime }; Descending = $true }, `
             @{ Expression = { Get-SessionTimestampFromRolloutPath -Path $_.FullName }; Descending = $true }, `
-            @{ Expression = { $_.Name }; Descending = $true }, `
-            @{ Expression = { $_.LastWriteTime }; Descending = $true })
+            @{ Expression = { $_.Name }; Descending = $true })
 
     $entries = foreach ($file in $files) {
         if (-not (Test-IsPrimarySessionRollout -Path $file.FullName)) {
@@ -980,7 +986,7 @@ function Get-CodexSessionEntries {
 
         [PSCustomObject]@{
             SessionId = $sessionId
-            Timestamp = Get-SessionTimestampFromRolloutPath -Path $file.FullName
+            Timestamp = Format-SessionLastUsedTime -LastWriteTime $file.LastWriteTime
             Preview = $preview
             Path = $file.FullName
             LastWriteTime = $file.LastWriteTime
@@ -1056,7 +1062,8 @@ function Resolve-SessionContext {
         }
     }
 
-    $entries = @(Get-CodexSessionEntries -SessionsDir $SessionsDir -MaxCount $SessionLimit)
+    $pickerMaxCount = if (Get-Command fzf -ErrorAction SilentlyContinue) { [int]::MaxValue } else { $SessionLimit }
+    $entries = @(Get-CodexSessionEntries -SessionsDir $SessionsDir -MaxCount $pickerMaxCount)
     $selected = Select-CodexSession -Entries $entries
     if ([string]::IsNullOrWhiteSpace($selected.WorkingDirectory)) {
         throw $script:Ui.NoSessionWorkingDirectory
