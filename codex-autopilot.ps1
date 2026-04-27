@@ -8,6 +8,7 @@ param(
     [int]$TurnStallTimeoutSeconds = 1800,
     [int]$LastMessageStableSeconds = 30,
     [string]$ResumePrompt,
+    [string]$ResumePromptsFile = (Join-Path $PSScriptRoot "resume-prompts.txt"),
     [string]$SessionsDir = (Join-Path $HOME ".codex\sessions"),
     [string]$SessionId,
     [int]$SessionLimit = 30,
@@ -21,34 +22,64 @@ $ErrorActionPreference = "Stop"
 
 $script:Ui = ConvertFrom-Json @'
 {
-  "ResumePrompt": "1.\u5148\u7528\u4e0a\u5e1d\u89c6\u89d2\u770b\u5f53\u524d\u72b6\u6001\u8ddd\u79bb\u6700\u7ec8\u9636\u6bb5\u7684\u6700\u7ec8\u76ee\u6807\u591a\u8fdc 2.\u63d0\u4ea4\u6240\u6709\u66f4\u6539\u4f5c\u4e3a\u65b0\u5f81\u7a0b\u7684\u57fa\u7ebf 3.\u7ee7\u7eed\u63a8\u8fdb\u65b0\u5f81\u7a0b,\u8981\u9ad8\u6548\u5229\u7528\u5b50\u4ee3\u7406\u52a0\u901f\u63a8\u8fdb\u901f\u5ea6",
-  "ResumePromptShort": "\u7ee7\u7eed",
-  "SelectPromptPrompt": "\u9009\u62e9\u63d0\u793a\u8bed: ",
-  "NoPromptSelected": "\u672a\u9009\u62e9\u4efb\u4f55\u63d0\u793a\u8bed\u3002",
-  "PromptHelp": "\u4f7f\u7528\u4e0a/\u4e0b\u65b9\u5411\u952e\u9009\u62e9\uff0c\u56de\u8f66\u786e\u8ba4\u3002",
-  "PromptLabelDefault": "\u8be6\u7ec6\u63d0\u793a\u8bed",
-  "PromptLabelShort": "\u7b80\u77ed\u63d0\u793a\u8bed\uff1a\u7ee7\u7eed",
-  "NoSessionsFound": "\u672a\u627e\u5230 Codex \u4f1a\u8bdd\u3002",
-  "NoSessionSelected": "\u672a\u9009\u62e9\u4efb\u4f55\u4f1a\u8bdd\u3002",
-  "SelectSessionPrompt": "\u9009\u62e9\u4f1a\u8bdd: ",
-  "RecentSessions": "\u6700\u8fd1\u7684\u4f1a\u8bdd\uff1a",
-  "SelectSessionNumber": "\u8bf7\u8f93\u5165\u4f1a\u8bdd\u7f16\u53f7",
-  "InvalidSelection": "\u8f93\u5165\u65e0\u6548\u3002",
-  "ResumingSession": "\u7ee7\u7eed\u4f1a\u8bdd\uff1a{0}",
-  "ConfigUpdated": "\u5df2\u66f4\u65b0 Codex \u914d\u7f6e\uff1a{0}",
-  "ConfigAlreadyUpdated": "Codex \u914d\u7f6e\u5df2\u5305\u542b\u5b8c\u6210\u6807\u8bb0\u6307\u4ee4\uff1a{0}",
-  "ExecExitCode": "codex exec \u4ee5\u9000\u51fa\u7801 {0} \u7ed3\u675f\uff0c\u505c\u6b62\u6267\u884c\u3002",
-  "LastMessageHeader": "--- \u6a21\u578b\u7684\u6700\u540e\u6d88\u606f ---",
-  "TaskComplete": "\u4efb\u52a1\u5df2\u5168\u90e8\u5b8c\u6210\uff0c\u9000\u51fa\u3002",
-  "MaxTurnsReached": "\u5df2\u8fbe\u5230\u6700\u5927\u8f6e\u6b21 ({0})\uff0c\u505c\u6b62\u6267\u884c\u4ee5\u907f\u514d\u5931\u63a7\u3002"
+  "ResumePrompt": "1.先用上帝视角看当前状态距离最终阶段的最终目标多远 2.提交所有更改作为新征程的基线 3.继续推进新征程,要高效利用子代理加速推进速度",
+  "ResumePromptShort": "继续",
+  "ResumePromptOkay": "好,可以,继续",
+  "SelectPromptPrompt": "选择提示语: ",
+  "NoPromptSelected": "未选择任何提示语。",
+  "PromptHelp": "使用上/下方向键选择，回车确认。",
+  "PromptLabelDefault": "详细提示语",
+  "PromptLabelShort": "简短提示语：继续",
+  "PromptLabelOkay": "简短提示语：好,可以,继续",
+  "NoSessionsFound": "未找到 Codex 会话。",
+  "NoSessionSelected": "未选择任何会话。",
+  "NoSessionWorkingDirectory": "选中的会话没有记录工作目录。",
+  "SelectSessionPrompt": "选择会话: ",
+  "RecentSessions": "最近的会话：",
+  "SelectSessionNumber": "请输入会话编号",
+  "InvalidSelection": "输入无效。",
+  "ResumingSession": "继续会话：{0}",
+  "ConfigUpdated": "已更新 Codex 配置：{0}",
+  "ConfigAlreadyUpdated": "Codex 配置已包含完成标记指令：{0}",
+  "ExecExitCode": "codex exec 以退出码 {0} 结束，停止执行。",
+  "LastMessageHeader": "--- 模型的最后消息 ---",
+  "TaskComplete": "任务已全部完成，退出。",
+  "MaxTurnsReached": "已达到最大轮次 ({0})，停止执行以避免失控。"
 }
 '@
 
-if (-not $PSBoundParameters.ContainsKey("ResumePrompt")) {
-    $ResumePrompt = $script:Ui.ResumePrompt
+$script:Utf8Encoding = New-Object System.Text.UTF8Encoding($false)
+
+function Get-DefaultResumePromptOptions {
+    return @(
+        $script:Ui.ResumePrompt
+        $script:Ui.ResumePromptShort
+        $script:Ui.ResumePromptOkay
+    )
 }
 
-$script:Utf8Encoding = New-Object System.Text.UTF8Encoding($false)
+function Get-ResumePromptOptions {
+    param([string]$PromptsFile)
+
+    if (-not [string]::IsNullOrWhiteSpace($PromptsFile) -and (Test-Path -LiteralPath $PromptsFile)) {
+        $content = [System.IO.File]::ReadAllText($PromptsFile, $script:Utf8Encoding)
+        $options = @(
+            ($content -split "`r?`n") |
+            ForEach-Object { $_.Trim() } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+        )
+
+        if ($options.Count -gt 0) {
+            return $options
+        }
+    }
+
+    return @(Get-DefaultResumePromptOptions)
+}
+
+if (-not $PSBoundParameters.ContainsKey("ResumePrompt")) {
+    $ResumePrompt = (Get-ResumePromptOptions -PromptsFile $ResumePromptsFile | Select-Object -First 1)
+}
 
 function Initialize-ConsoleUtf8 {
     [Console]::InputEncoding = $script:Utf8Encoding
@@ -504,18 +535,25 @@ function Get-CodexExecArgumentList {
 }
 
 function Select-ResumePrompt {
-    $entries = @(
-        [PSCustomObject]@{
-            Key = "Default"
-            Label = $script:Ui.PromptLabelDefault
-            Value = $script:Ui.ResumePrompt
+    $options = @(Get-ResumePromptOptions -PromptsFile $ResumePromptsFile)
+    $defaultOptions = @(Get-DefaultResumePromptOptions)
+
+    $entries = @()
+    for ($i = 0; $i -lt $options.Count; $i++) {
+        $value = $options[$i]
+        $label = switch ($value) {
+            $script:Ui.ResumePrompt { $script:Ui.PromptLabelDefault; break }
+            $script:Ui.ResumePromptShort { $script:Ui.PromptLabelShort; break }
+            $script:Ui.ResumePromptOkay { $script:Ui.PromptLabelOkay; break }
+            default { $value; break }
         }
-        [PSCustomObject]@{
-            Key = "Short"
-            Label = $script:Ui.PromptLabelShort
-            Value = $script:Ui.ResumePromptShort
+
+        $entries += [PSCustomObject]@{
+            Key = "Option{0}" -f $i
+            Label = $label
+            Value = $value
         }
-    )
+    }
 
     $selectedIndex = 0
     Write-MenuOptions -Entries $entries -SelectedIndex $selectedIndex -Prompt $script:Ui.SelectPromptPrompt -HelpText $script:Ui.PromptHelp
@@ -965,7 +1003,8 @@ function Select-CodexSession {
     $fzfCommand = Get-Command fzf -ErrorAction SilentlyContinue
     if ($fzfCommand) {
         $options = $Entries | ForEach-Object {
-            "{0}`t[{1}]`t{2}" -f $_.SessionId, $_.Timestamp, $_.Preview
+            $workingDirectory = if ([string]::IsNullOrWhiteSpace($_.WorkingDirectory)) { "-" } else { $_.WorkingDirectory }
+            "{0}`t[{1}]`t{2}`t{3}" -f $_.SessionId, $_.Timestamp, $workingDirectory, $_.Preview
         }
 
         $selected = $options | & $fzfCommand.Source --prompt $script:Ui.SelectSessionPrompt --height 20 --reverse
@@ -980,7 +1019,8 @@ function Select-CodexSession {
     Write-Host $script:Ui.RecentSessions -ForegroundColor Cyan
     for ($i = 0; $i -lt $Entries.Count; $i++) {
         $entry = $Entries[$i]
-        Write-Host ("[{0}] {1} [{2}] {3}" -f ($i + 1), $entry.SessionId, $entry.Timestamp, $entry.Preview)
+        $workingDirectory = if ([string]::IsNullOrWhiteSpace($entry.WorkingDirectory)) { "-" } else { $entry.WorkingDirectory }
+        Write-Host ("[{0}] {1} [{2}] {3} | {4}" -f ($i + 1), $entry.SessionId, $entry.Timestamp, $workingDirectory, $entry.Preview)
     }
 
     while ($true) {
@@ -1006,14 +1046,21 @@ function Resolve-SessionContext {
             Where-Object { $_.SessionId -eq $SessionId } |
             Select-Object -First 1
 
+        if (-not $entry -or [string]::IsNullOrWhiteSpace($entry.WorkingDirectory)) {
+            throw $script:Ui.NoSessionWorkingDirectory
+        }
+
         return [PSCustomObject]@{
             SessionId = $SessionId
-            WorkingDirectory = if ($entry) { $entry.WorkingDirectory } else { $null }
+            WorkingDirectory = $entry.WorkingDirectory
         }
     }
 
     $entries = @(Get-CodexSessionEntries -SessionsDir $SessionsDir -MaxCount $SessionLimit)
     $selected = Select-CodexSession -Entries $entries
+    if ([string]::IsNullOrWhiteSpace($selected.WorkingDirectory)) {
+        throw $script:Ui.NoSessionWorkingDirectory
+    }
     Write-Host ($script:Ui.ResumingSession -f $selected.SessionId) -ForegroundColor Green
     return [PSCustomObject]@{
         SessionId = $selected.SessionId

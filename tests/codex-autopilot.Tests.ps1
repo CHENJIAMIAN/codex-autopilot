@@ -4,19 +4,21 @@ Remove-Item Env:CODEX_AUTOPILOT_IMPORT_ONLY -ErrorAction SilentlyContinue
 
 $expectedUi = ConvertFrom-Json @'
 {
-  "ResumePrompt": "1.\u5148\u7528\u4e0a\u5e1d\u89c6\u89d2\u770b\u5f53\u524d\u72b6\u6001\u8ddd\u79bb\u6700\u7ec8\u9636\u6bb5\u7684\u6700\u7ec8\u76ee\u6807\u591a\u8fdc 2.\u63d0\u4ea4\u6240\u6709\u66f4\u6539\u4f5c\u4e3a\u65b0\u5f81\u7a0b\u7684\u57fa\u7ebf 3.\u7ee7\u7eed\u63a8\u8fdb\u65b0\u5f81\u7a0b,\u8981\u9ad8\u6548\u5229\u7528\u5b50\u4ee3\u7406\u52a0\u901f\u63a8\u8fdb\u901f\u5ea6",
-  "ResumePromptShort": "\u7ee7\u7eed",
-  "SelectPromptPrompt": "\u9009\u62e9\u63d0\u793a\u8bed: ",
-  "NoPromptSelected": "\u672a\u9009\u62e9\u4efb\u4f55\u63d0\u793a\u8bed\u3002",
-  "PromptHelp": "\u4f7f\u7528\u4e0a/\u4e0b\u65b9\u5411\u952e\u9009\u62e9\uff0c\u56de\u8f66\u786e\u8ba4\u3002",
-  "PromptLabelDefault": "\u8be6\u7ec6\u63d0\u793a\u8bed",
-  "PromptLabelShort": "\u7b80\u77ed\u63d0\u793a\u8bed\uff1a\u7ee7\u7eed",
-  "SelectSessionPrompt": "\u9009\u62e9\u4f1a\u8bdd: ",
-  "RecentSessions": "\u6700\u8fd1\u7684\u4f1a\u8bdd\uff1a",
-  "SelectSessionNumber": "\u8bf7\u8f93\u5165\u4f1a\u8bdd\u7f16\u53f7",
-  "InvalidSelection": "\u8f93\u5165\u65e0\u6548\u3002",
-  "TaskComplete": "\u4efb\u52a1\u5df2\u5168\u90e8\u5b8c\u6210\uff0c\u9000\u51fa\u3002",
-  "ChinesePreview": "\u7ee7\u7eed\u6267\u884c\uff0c\u76f4\u5230\u5b8c\u6210"
+  "ResumePrompt": "1.先用上帝视角看当前状态距离最终阶段的最终目标多远 2.提交所有更改作为新征程的基线 3.继续推进新征程,要高效利用子代理加速推进速度",
+  "ResumePromptShort": "继续",
+  "ResumePromptOkay": "好,可以,继续",
+  "SelectPromptPrompt": "选择提示语: ",
+  "NoPromptSelected": "未选择任何提示语。",
+  "PromptHelp": "使用上/下方向键选择，回车确认。",
+  "PromptLabelDefault": "详细提示语",
+  "PromptLabelShort": "简短提示语：继续",
+  "PromptLabelOkay": "简短提示语：好,可以,继续",
+  "SelectSessionPrompt": "选择会话: ",
+  "RecentSessions": "最近的会话：",
+  "SelectSessionNumber": "请输入会话编号",
+  "InvalidSelection": "输入无效。",
+  "TaskComplete": "任务已全部完成，退出。",
+  "ChinesePreview": "继续执行，直到完成"
 }
 '@
 
@@ -26,8 +28,9 @@ Describe "Localized prompts" {
         $ResumePrompt | Should Be $expectedUi.ResumePrompt
     }
 
-    It "includes the short continue resume prompt" {
+    It "includes the short resume prompts" {
         $script:Ui.ResumePromptShort | Should Be $expectedUi.ResumePromptShort
+        $script:Ui.ResumePromptOkay | Should Be $expectedUi.ResumePromptOkay
     }
 
     It "includes prompt picker labels" {
@@ -36,6 +39,7 @@ Describe "Localized prompts" {
         $script:Ui.PromptHelp | Should Be $expectedUi.PromptHelp
         $script:Ui.PromptLabelDefault | Should Be $expectedUi.PromptLabelDefault
         $script:Ui.PromptLabelShort | Should Be $expectedUi.PromptLabelShort
+        $script:Ui.PromptLabelOkay | Should Be $expectedUi.PromptLabelOkay
     }
 
     It "uses Chinese session and completion prompts" {
@@ -50,6 +54,42 @@ Describe "Localized prompts" {
 Describe "Default paths" {
     It "uses a script-local default run state file" {
         $RunStateFile | Should Be "D:\Desktop\codex-autopilot\run-state.json"
+    }
+
+    It "uses a script-local default resume prompts file" {
+        $ResumePromptsFile | Should Be "D:\Desktop\codex-autopilot\resume-prompts.txt"
+    }
+}
+
+Describe "Get-ResumePromptOptions" {
+    It "falls back to the built-in prompt list when the prompts file is missing" {
+        $path = Join-Path $TestDrive "missing-resume-prompts.txt"
+
+        $options = @(Get-ResumePromptOptions -PromptsFile $path)
+
+        $options | Should Be @(
+            $expectedUi.ResumePrompt
+            $expectedUi.ResumePromptShort
+            $expectedUi.ResumePromptOkay
+        )
+    }
+
+    It "loads prompt options from the prompts file and ignores blank lines" {
+        $path = Join-Path $TestDrive "resume-prompts.txt"
+        Set-Content -LiteralPath $path -Value @'
+第一项
+
+第二项
+  第三项  
+'@
+
+        $options = @(Get-ResumePromptOptions -PromptsFile $path)
+
+        $options | Should Be @(
+            "第一项"
+            "第二项"
+            "第三项"
+        )
     }
 }
 
@@ -195,19 +235,57 @@ Describe "Select-ResumePrompt" {
         $selected | Should Be $expectedUi.ResumePromptShort
     }
 
-    It "passes the full prompt values to the prompt menu" {
-        Mock Get-ConsoleKeyInfo { return [pscustomobject]@{ VirtualKeyCode = 13 } }
+    It "can select the third prompt option with arrow keys" {
+        Mock Get-ConsoleKeyInfo {
+            if (-not $script:PromptKeyQueue) {
+                $script:PromptKeyQueue = @(
+                    [pscustomobject]@{ VirtualKeyCode = 40 }
+                    [pscustomobject]@{ VirtualKeyCode = 40 }
+                    [pscustomobject]@{ VirtualKeyCode = 13 }
+                )
+            }
+
+            $next = $script:PromptKeyQueue[0]
+            if ($script:PromptKeyQueue.Count -eq 1) {
+                $script:PromptKeyQueue = @()
+            }
+            else {
+                $script:PromptKeyQueue = $script:PromptKeyQueue[1..($script:PromptKeyQueue.Count - 1)]
+            }
+            return $next
+        }
         Mock Write-Host {}
         Mock Write-MenuOptions {}
 
         $selected = Select-ResumePrompt
 
-        $selected | Should Be $expectedUi.ResumePrompt
-        Assert-MockCalled Write-MenuOptions -Times 1 -ParameterFilter {
-            $Entries.Count -eq 2 -and
-            $Entries[0].Value -eq $expectedUi.ResumePrompt -and
-            $Entries[1].Value -eq $expectedUi.ResumePromptShort
+        $selected | Should Be $expectedUi.ResumePromptOkay
+    }
+
+    It "passes the full prompt values to the prompt menu" {
+        $script:CapturedPromptEntries = $null
+        Mock Get-ConsoleKeyInfo { return [pscustomobject]@{ VirtualKeyCode = 13 } }
+        Mock Get-ResumePromptOptions {
+            @(
+                $expectedUi.ResumePrompt
+                $expectedUi.ResumePromptShort
+                $expectedUi.ResumePromptOkay
+            )
         }
+        Mock Write-Host {}
+        Mock Write-MenuOptions {
+            param($Entries)
+            $script:CapturedPromptEntries = ,$Entries
+        }
+
+        $selected = Select-ResumePrompt
+
+        $selected | Should Be $expectedUi.ResumePrompt
+        $capturedEntries = @($script:CapturedPromptEntries[0])
+        $capturedEntries.Count | Should Be 3
+        $capturedEntries[0].Value | Should Be $expectedUi.ResumePrompt
+        $capturedEntries[1].Value | Should Be $expectedUi.ResumePromptShort
+        $capturedEntries[2].Value | Should Be $expectedUi.ResumePromptOkay
     }
 }
 
@@ -515,6 +593,66 @@ Describe "Get-WindowTitle" {
     }
 }
 
+Describe "Select-CodexSession" {
+    It "includes the working directory in fzf option text" {
+        $entries = @(
+            [PSCustomObject]@{
+                SessionId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+                Timestamp = "2026-04-15T12-00-00"
+                Preview = "resume me"
+                Path = "D:\fake\rollout.jsonl"
+                LastWriteTime = [datetime]"2026-04-15T12:00:00"
+                WorkingDirectory = "D:\Desktop\project-a"
+            }
+        )
+        $script:FzfInput = @()
+        function global:fake-fzf {
+            param([string]$prompt, [string]$height, [string]$reverse)
+            $script:FzfInput = @($input)
+            return $script:FzfInput[0]
+        }
+
+        Mock Get-Command {
+            [pscustomobject]@{
+                Source = "fake-fzf"
+            }
+        } -ParameterFilter { $Name -eq "fzf" }
+        Mock Write-Host {}
+        Mock Read-Host { throw "Read-Host should not be used when fzf is available." }
+
+        $selected = Select-CodexSession -Entries $entries
+
+        $selected.SessionId | Should Be "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        $script:FzfInput[0] | Should Be "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa`t[2026-04-15T12-00-00]`tD:\Desktop\project-a`tresume me"
+    }
+
+    It "includes the working directory in the numbered session list" {
+        $entries = @(
+            [PSCustomObject]@{
+                SessionId = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+                Timestamp = "2026-04-15T12-30-00"
+                Preview = "keep going"
+                Path = "D:\fake\rollout.jsonl"
+                LastWriteTime = [datetime]"2026-04-15T12:30:00"
+                WorkingDirectory = "D:\Desktop\project-b"
+            }
+        )
+        $script:WriteHostCalls = @()
+
+        Mock Get-Command { $null } -ParameterFilter { $Name -eq "fzf" }
+        Mock Read-Host { return "1" }
+        Mock Write-Host {
+            param($Object)
+            $script:WriteHostCalls += @($Object)
+        }
+
+        $selected = Select-CodexSession -Entries $entries
+
+        $selected.SessionId | Should Be "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        ($script:WriteHostCalls -contains "[1] bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb [2026-04-15T12-30-00] D:\Desktop\project-b | keep going") | Should Be $true
+    }
+}
+
 Describe "Resolve-SessionContext" {
     It "returns the selected session id and its original working directory" {
         $sessionsRoot = Join-Path $TestDrive "case5\\.codex\\sessions"
@@ -552,6 +690,38 @@ Describe "Resolve-SessionContext" {
 
         $context.SessionId | Should Be "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
         $context.WorkingDirectory | Should Be "D:\Desktop\picked-project"
+    }
+
+    It "throws when a selected session id has no working directory" {
+        $sessionsRoot = Join-Path $TestDrive "case6\\.codex\\sessions"
+        $dayPath = Join-Path $sessionsRoot "2026\\04\\15"
+        New-Item -ItemType Directory -Path $dayPath -Force | Out-Null
+
+        $path = Join-Path $dayPath "rollout-2026-04-15T11-00-00-ffffffff-ffff-ffff-ffff-ffffffffffff.jsonl"
+        Set-Content -LiteralPath $path -Value @'
+{"timestamp":"2026-04-15T03:00:00.000Z","type":"session_meta","payload":{"id":"ffffffff-ffff-ffff-ffff-ffffffffffff","agent_role":"default"}}
+{"timestamp":"2026-04-15T03:00:01.000Z","type":"event_msg","payload":{"type":"user_message","message":"resume me"}}
+'@
+
+        { Resolve-SessionContext -SessionId "ffffffff-ffff-ffff-ffff-ffffffffffff" -SessionsDir $sessionsRoot -SessionLimit 10 } | Should Throw "选中的会话没有记录工作目录"
+    }
+
+    It "throws when the picker returns a session without a working directory" {
+        $entries = @(
+            [PSCustomObject]@{
+                SessionId = "99999999-9999-9999-9999-999999999999"
+                Timestamp = "2026-04-15T11-00-00"
+                Preview = "pick me"
+                Path = "D:\fake\rollout.jsonl"
+                LastWriteTime = [datetime]"2026-04-15T11:00:00"
+                WorkingDirectory = $null
+            }
+        )
+
+        Mock Select-CodexSession { return $entries[0] }
+        Mock Get-CodexSessionEntries { return $entries }
+
+        { Resolve-SessionContext -SessionsDir "D:\fake\sessions" -SessionLimit 10 } | Should Throw "选中的会话没有记录工作目录"
     }
 }
 
@@ -598,7 +768,7 @@ Describe "Get-SessionPreviewFromRollout" {
         $rolloutPath = Join-Path $TestDrive "rollout-2026-04-14T19-30-07-019d8bc1-8036-7402-baa8-d8553d7b3738.jsonl"
         Set-Content -LiteralPath $rolloutPath -Encoding UTF8 -Value @'
 {"timestamp":"2026-04-14T11:30:12.807Z","type":"session_meta","payload":{"id":"019d8bc1-8036-7402-baa8-d8553d7b3738"}}
-{"timestamp":"2026-04-14T11:30:13.000Z","type":"event_msg","payload":{"type":"user_message","message":"\u7ee7\u7eed\u6267\u884c\uff0c\u76f4\u5230\u5b8c\u6210"}}
+{"timestamp":"2026-04-14T11:30:13.000Z","type":"event_msg","payload":{"type":"user_message","message":"继续执行，直到完成"}}
 '@
 
         $preview = Get-SessionPreviewFromRollout -Path $rolloutPath
