@@ -1,14 +1,39 @@
 # codex-autopilot
 
-Windows launcher for resuming Codex sessions, picking a saved session interactively, and continuing turn-by-turn until the user stops it or a safety condition ends the run.
+Windows autopilot wrapper for continuing existing Codex sessions turn by turn.
+
+It is built for a simple workflow:
+
+- pick an existing Codex session
+- resume it with a configurable prompt
+- keep running turns until you stop, hit a safety limit, or Codex exits non-zero
+
+## What It Does
+
+- Resume an existing Codex session by picker or explicit `SessionId`
+- Continue automatically for multiple turns with a configurable `MaxTurns`
+- Persist run state to `run-state.json` so interrupted runs can continue from the next turn
+- Retry transient non-zero `codex exec` exits without consuming extra turn budget
+- Recover conservatively from long stalled turns when the last message is already stable
+- Show session working directory in the picker
+- Prefer full session history when `fzf` is available, with fallback to numbered selection
+- Load resume prompt options from `resume-prompts.txt` so prompt changes do not require code edits
+
+## Requirements
+
+- Windows
+- PowerShell
+- Codex CLI available as `codex`
+- Optional: `fzf` for searchable session selection
 
 ## Files
 
 - `codex-autopilot.ps1`: main script
 - `codex-autopilot.cmd`: double-clickable launcher
+- `resume-prompts.txt`: one resume prompt option per line
 - `tests/codex-autopilot.Tests.ps1`: Pester tests
 
-## Usage
+## Quick Start
 
 Run the launcher:
 
@@ -16,42 +41,103 @@ Run the launcher:
 D:\Desktop\codex-autopilot\codex-autopilot.cmd
 ```
 
-Or run the PowerShell script directly:
+Or run the script directly:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File D:\Desktop\codex-autopilot\codex-autopilot.ps1
 ```
 
-If you do not pass `-ResumePrompt`, the script will first show a prompt picker. You can use the up/down arrow keys to choose between the detailed prompt and `继续`, then press Enter to confirm.
+If you do not pass `-ResumePrompt`, the script opens a prompt picker first.
 
-```powershell
-powershell -ExecutionPolicy Bypass -File D:\Desktop\codex-autopilot\codex-autopilot.ps1
+## Session Picker
+
+- With `fzf`: load all primary sessions and search interactively
+- Without `fzf`: show a numbered recent-session list limited by `SessionLimit`
+- The time column is based on the session rollout file's last write time, which reflects last use better than original creation time
+- The picker also shows each session's working directory
+
+If a selected session does not have a recorded working directory, the script stops with an explicit error instead of resuming in the wrong directory.
+
+## Resume Prompts
+
+Prompt options live in `resume-prompts.txt`.
+
+- One line = one selectable prompt
+- Blank lines are ignored
+- The first line becomes the default `ResumePrompt`
+- If the file is missing or empty, the script falls back to built-in defaults
+
+Example:
+
+```text
+1.先用上帝视角看当前状态距离最终阶段的最终目标多远 2.提交所有更改作为新征程的基线 3.继续推进新征程,要高效利用子代理加速推进速度
+继续
+好,可以,继续
+好,可以,先提交再继续
 ```
 
-By default, the latest autopilot run state is persisted next to the script at `D:\Desktop\codex-autopilot\run-state.json`. To use a different state file, pass `-RunStateFile`:
+## Run State
+
+By default, state is persisted next to the script at:
+
+```text
+D:\Desktop\codex-autopilot\run-state.json
+```
+
+You can override it with:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File D:\Desktop\codex-autopilot\codex-autopilot.ps1 -RunStateFile D:\Desktop\codex-autopilot\run-state.json
 ```
 
-The state file records the session id, working directory, latest turn, stop reason, last exit code, stall-recovery flag, and a hash/length of the last assistant message. State writes use a same-directory temp file and replace the destination after the new JSON is written. On the next run with the same `-RunStateFile`, matching session and working-directory state resumes from the next turn when the previous stop reason was `loop_continue`. Completed max-turn state is treated as already finished when the recorded turn is greater than or equal to the current `-MaxTurns`; increasing `-MaxTurns` continues from the next turn. Invalid JSON, invalid numeric fields, session mismatch, and working-directory mismatch are ignored and start from turn 1. To force a fresh run, delete the state file or pass a different `-RunStateFile`.
+The state file records:
 
-To retry transient non-zero `codex exec` exits within the same turn, pass `-RetryCount` and optionally `-RetryDelaySeconds`:
+- session id
+- working directory
+- latest turn
+- stop reason
+- last exit code
+- stall recovery status
+- last assistant-message hash and length
+
+If the previous stop reason was `loop_continue`, the next run resumes from the next turn when session id and working directory still match.
+
+## Retry Behavior
+
+Retry transient non-zero `codex exec` exits within the same turn:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File D:\Desktop\codex-autopilot\codex-autopilot.ps1 -RetryCount 2 -RetryDelaySeconds 10
 ```
 
-Retries do not consume additional turn budget. Each failed attempt logs `event=exec_retry` with `failure_class=exec_exit_nonzero`. If all retries are exhausted, the run returns the last exit code and writes `stop_reason=exec_retry_exhausted`; when `-RetryCount` is not set, the legacy `stop_reason=exec_exit_nonzero` behavior is preserved.
+- Retries do not consume additional turn budget
+- Failed retry attempts are logged as `event=exec_retry`
+- If retries are exhausted, the run ends with `stop_reason=exec_retry_exhausted`
 
-By default, Codex still runs with the legacy low-friction `--yolo` behavior. To use safer execution settings, choose an explicit execution mode:
+## Execution Modes
+
+Legacy default:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File D:\Desktop\codex-autopilot\codex-autopilot.ps1
+```
+
+Explicit full-auto:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File D:\Desktop\codex-autopilot\codex-autopilot.ps1 -CodexExecutionMode full-auto
+```
+
+Explicit sandbox:
+
+```powershell
 powershell -ExecutionPolicy Bypass -File D:\Desktop\codex-autopilot\codex-autopilot.ps1 -CodexExecutionMode sandbox -CodexSandboxMode workspace-write -CodexProfile safe-defaults
 ```
 
-Supported `-CodexExecutionMode` values are `yolo`, `full-auto`, and `sandbox`. Supported `-CodexSandboxMode` values are `read-only`, `workspace-write`, and `danger-full-access`.
+Supported values:
+
+- `CodexExecutionMode`: `yolo`, `full-auto`, `sandbox`
+- `CodexSandboxMode`: `read-only`, `workspace-write`, `danger-full-access`
 
 ## Verification
 
