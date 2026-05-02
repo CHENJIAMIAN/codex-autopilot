@@ -8,11 +8,15 @@ $expectedUi = ConvertFrom-Json @'
   "ResumePromptShort": "继续",
   "ResumePromptOkay": "好,可以,继续",
   "SelectPromptPrompt": "选择提示语: ",
+  "SelectMaxTurnsPrompt": "选择轮次数: ",
   "NoPromptSelected": "未选择任何提示语。",
+  "NoMaxTurnsSelected": "未选择任何轮次数。",
   "PromptHelp": "使用上/下方向键选择，回车确认。",
+  "MaxTurnsHelp": "使用上/下方向键选择，回车确认。",
   "PromptLabelDefault": "详细提示语",
   "PromptLabelShort": "简短提示语：继续",
   "PromptLabelOkay": "简短提示语：好,可以,继续",
+  "MaxTurnsLabelDefault": "50（默认）",
   "SelectSessionPrompt": "选择会话: ",
   "RecentSessions": "最近的会话：",
   "SelectSessionNumber": "请输入会话编号",
@@ -35,11 +39,15 @@ Describe "Localized prompts" {
 
     It "includes prompt picker labels" {
         $script:Ui.SelectPromptPrompt | Should Be $expectedUi.SelectPromptPrompt
+        $script:Ui.SelectMaxTurnsPrompt | Should Be $expectedUi.SelectMaxTurnsPrompt
         $script:Ui.NoPromptSelected | Should Be $expectedUi.NoPromptSelected
+        $script:Ui.NoMaxTurnsSelected | Should Be $expectedUi.NoMaxTurnsSelected
         $script:Ui.PromptHelp | Should Be $expectedUi.PromptHelp
+        $script:Ui.MaxTurnsHelp | Should Be $expectedUi.MaxTurnsHelp
         $script:Ui.PromptLabelDefault | Should Be $expectedUi.PromptLabelDefault
         $script:Ui.PromptLabelShort | Should Be $expectedUi.PromptLabelShort
         $script:Ui.PromptLabelOkay | Should Be $expectedUi.PromptLabelOkay
+        $script:Ui.MaxTurnsLabelDefault | Should Be $expectedUi.MaxTurnsLabelDefault
     }
 
     It "uses Chinese session and completion prompts" {
@@ -58,6 +66,10 @@ Describe "Default paths" {
 
     It "uses a script-local default resume prompts file" {
         $ResumePromptsFile | Should Be "D:\Desktop\codex-autopilot\resume-prompts.txt"
+    }
+
+    It "uses a process-scoped default last message file" {
+        $LastMessageFile | Should Be (Join-Path $env:TEMP ("codex_last_msg_{0}.txt" -f $PID))
     }
 }
 
@@ -286,6 +298,111 @@ Describe "Select-ResumePrompt" {
         $capturedEntries[0].Value | Should Be $expectedUi.ResumePrompt
         $capturedEntries[1].Value | Should Be $expectedUi.ResumePromptShort
         $capturedEntries[2].Value | Should Be $expectedUi.ResumePromptOkay
+    }
+}
+
+Describe "Select-MaxTurns" {
+    It "returns the default max turns when enter is pressed immediately" {
+        Mock Get-ConsoleKeyInfo { return [pscustomobject]@{ VirtualKeyCode = 13 } }
+        Mock Write-Host {}
+        Mock Write-MenuOptions {}
+
+        $selected = Select-MaxTurns
+
+        $selected | Should Be 50
+    }
+
+    It "can select 10 turns with arrow keys" {
+        Mock Get-ConsoleKeyInfo {
+            if (-not $script:TurnCountKeyQueue) {
+                $script:TurnCountKeyQueue = @(
+                    [pscustomobject]@{ VirtualKeyCode = 40 }
+                    [pscustomobject]@{ VirtualKeyCode = 40 }
+                    [pscustomobject]@{ VirtualKeyCode = 13 }
+                )
+            }
+
+            $next = $script:TurnCountKeyQueue[0]
+            if ($script:TurnCountKeyQueue.Count -eq 1) {
+                $script:TurnCountKeyQueue = @()
+            }
+            else {
+                $script:TurnCountKeyQueue = $script:TurnCountKeyQueue[1..($script:TurnCountKeyQueue.Count - 1)]
+            }
+            return $next
+        }
+        Mock Write-Host {}
+        Mock Write-MenuOptions {}
+
+        $selected = Select-MaxTurns
+
+        $selected | Should Be 10
+    }
+
+    It "passes the max turn options to the menu with 50 marked as default" {
+        $script:CapturedTurnCountEntries = $null
+        Mock Get-ConsoleKeyInfo { return [pscustomobject]@{ VirtualKeyCode = 13 } }
+        Mock Write-Host {}
+        Mock Write-MenuOptions {
+            param($Entries)
+            $script:CapturedTurnCountEntries = ,$Entries
+        }
+
+        $selected = Select-MaxTurns
+
+        $selected | Should Be 50
+        $capturedEntries = @($script:CapturedTurnCountEntries[0])
+        $capturedEntries.Count | Should Be 5
+        $capturedEntries[0].Label | Should Be $expectedUi.MaxTurnsLabelDefault
+        $capturedEntries[0].Value | Should Be 50
+        $capturedEntries[1].Value | Should Be 15
+        $capturedEntries[2].Value | Should Be 10
+        $capturedEntries[3].Value | Should Be 5
+        $capturedEntries[4].Value | Should Be 3
+    }
+}
+
+Describe "Resolve-InteractiveRunOptions" {
+    It "selects prompt and max turns when neither was provided explicitly" {
+        $script:SelectedPromptCalled = $false
+        $script:SelectedMaxTurnsCalled = $false
+        Mock Select-ResumePrompt { $script:SelectedPromptCalled = $true; return $expectedUi.ResumePromptShort }
+        Mock Select-MaxTurns { $script:SelectedMaxTurnsCalled = $true; return 15 }
+
+        $options = Resolve-InteractiveRunOptions -ResumePrompt $ResumePrompt -MaxTurns 50 -HasResumePrompt $false -HasMaxTurns $false
+
+        $options.ResumePrompt | Should Be $expectedUi.ResumePromptShort
+        $options.MaxTurns | Should Be 15
+        $script:SelectedPromptCalled | Should Be $true
+        $script:SelectedMaxTurnsCalled | Should Be $true
+    }
+
+    It "does not open the max turns menu when max turns was provided explicitly" {
+        $script:SelectedPromptCalled = $false
+        $script:SelectedMaxTurnsCalled = $false
+        Mock Select-ResumePrompt { $script:SelectedPromptCalled = $true; return $expectedUi.ResumePromptShort }
+        Mock Select-MaxTurns { $script:SelectedMaxTurnsCalled = $true; throw "should not prompt for max turns" }
+
+        $options = Resolve-InteractiveRunOptions -ResumePrompt $ResumePrompt -MaxTurns 5 -HasResumePrompt $false -HasMaxTurns $true
+
+        $options.ResumePrompt | Should Be $expectedUi.ResumePromptShort
+        $options.MaxTurns | Should Be 5
+        $script:SelectedPromptCalled | Should Be $true
+        $script:SelectedMaxTurnsCalled | Should Be $false
+    }
+
+    It "does not open either menu when both values were provided explicitly" {
+        $script:SelectedPromptCalled = $false
+        $script:SelectedMaxTurnsCalled = $false
+        Mock Select-ResumePrompt { $script:SelectedPromptCalled = $true; throw "should not prompt for resume prompt" }
+        Mock Select-MaxTurns { $script:SelectedMaxTurnsCalled = $true; throw "should not prompt for max turns" }
+
+        $options = Resolve-InteractiveRunOptions -ResumePrompt "Continue" -MaxTurns 3 -HasResumePrompt $true -HasMaxTurns $true
+
+        $options.ResumePrompt | Should Be "Continue"
+        $options.MaxTurns | Should Be 3
+        $script:SelectedPromptCalled | Should Be $false
+        $script:SelectedMaxTurnsCalled | Should Be $false
     }
 }
 
@@ -1013,6 +1130,46 @@ Describe "Invoke-CodexAutopilot" {
         $logText | Should Not Match 'event=stop reason=task_complete'
     }
 
+    It "quotes the logged codex command arguments" {
+        $lastMessagePath = Join-Path $TestDrive "last-message-quoted-command.txt"
+        $logPath = Join-Path $TestDrive "autopilot-quoted-command.log"
+        Set-Content -LiteralPath $lastMessagePath -Value ""
+
+        Mock Get-CodexExecutablePath { return "C:\Program Files\Codex\codex.exe" }
+        Mock Get-CodexExecArgumentList { return @("exec", "--yolo", "-o", $lastMessagePath, "resume", "--last", "Continue with spaces") }
+        Mock Invoke-CodexCommand { return 0 }
+        Mock Start-Sleep {}
+        Mock Set-WindowTitle {}
+
+        $exitCode = Invoke-CodexAutopilot -MaxTurns 1 -SleepSeconds 0 -LastMessageFile $lastMessagePath -ResumePrompt "Continue with spaces" -LogFile $logPath
+
+        $exitCode | Should Be 0
+        $logText = Read-TextFileUtf8 -Path $logPath
+        $logText | Should Match 'event=exec_invoke turn=1 attempt=0 command="C:\\Program Files\\Codex\\codex\.exe" exec --yolo -o .* resume --last "Continue with spaces"'
+    }
+
+    It "does not print an empty last message block" {
+        $lastMessagePath = Join-Path $TestDrive "last-message-empty-output.txt"
+        $logPath = Join-Path $TestDrive "autopilot-empty-output.log"
+        Set-Content -LiteralPath $lastMessagePath -Value "stale answer"
+        $script:HostLines = @()
+
+        Mock Get-CodexExecArgumentList { return @("exec") }
+        Mock Invoke-CodexCommand { return 0 }
+        Mock Start-Sleep {}
+        Mock Set-WindowTitle {}
+        Mock Write-Host {
+            param($Object)
+            $script:HostLines += [string]$Object
+        }
+
+        $exitCode = Invoke-CodexAutopilot -MaxTurns 1 -SleepSeconds 0 -LastMessageFile $lastMessagePath -ResumePrompt "Continue" -LogFile $logPath
+
+        $exitCode | Should Be 0
+        ($script:HostLines -contains $script:Ui.LastMessageHeader) | Should Be $false
+        Read-TextFileUtf8 -Path $logPath | Should Match 'event=last_message_read turn=1 length=0'
+    }
+
     It "continues into the next turn after turn 1 succeeds" {
         $lastMessagePath = Join-Path $TestDrive "last-message-next-turn.txt"
         $logPath = Join-Path $TestDrive "autopilot-next-turn.log"
@@ -1034,6 +1191,31 @@ Describe "Invoke-CodexAutopilot" {
         $logText | Should Match 'event=sleep_start turn=1 seconds=0'
         $logText | Should Match 'event=sleep_end turn=1'
         $logText | Should Match 'event=loop_continue next_turn=2'
+    }
+
+    It "clears stale last message content before starting a turn" {
+        $lastMessagePath = Join-Path $TestDrive "last-message-stale.txt"
+        $logPath = Join-Path $TestDrive "autopilot-stale.log"
+        Set-Content -LiteralPath $lastMessagePath -Value "stale previous answer"
+
+        Mock Get-CodexExecArgumentList { return @("exec") }
+        Mock Invoke-CodexCommand {
+            $contentBeforeRun = Read-TextFileUtf8 -Path $lastMessagePath
+            if ($contentBeforeRun -ne "") {
+                throw "Expected stale last message to be cleared before execution, got: $contentBeforeRun"
+            }
+            Set-Content -LiteralPath $lastMessagePath -Value "fresh answer"
+            return 0
+        }
+        Mock Start-Sleep {}
+        Mock Set-WindowTitle {}
+
+        $exitCode = Invoke-CodexAutopilot -MaxTurns 1 -SleepSeconds 0 -LastMessageFile $lastMessagePath -ResumePrompt "Continue" -SessionId "ffffffff-ffff-ffff-ffff-ffffffffffff" -LogFile $logPath
+
+        $exitCode | Should Be 0
+        Assert-MockCalled Invoke-CodexCommand -Times 1
+        Read-TextFileUtf8 -Path $lastMessagePath | Should Match "fresh answer"
+        Read-TextFileUtf8 -Path $logPath | Should Match 'event=last_message_cleared turn=1'
     }
 
     It "writes stop reason logs for non-zero exit" {
@@ -1059,15 +1241,20 @@ Describe "Invoke-CodexAutopilot" {
         $logPath = Join-Path $TestDrive "autopilot-retry-success.log"
         Set-Content -LiteralPath $lastMessagePath -Value "retry recovered"
         $script:CommandExitCodes = @(12, 0)
+        $script:RetryAttemptInputs = @()
 
         Mock Get-CodexExecArgumentList { return @("exec") }
         Mock Invoke-CodexCommand {
+            $script:RetryAttemptInputs += (Read-TextFileUtf8 -Path $lastMessagePath)
             $next = $script:CommandExitCodes[0]
             if ($script:CommandExitCodes.Count -eq 1) {
                 $script:CommandExitCodes = @()
             }
             else {
                 $script:CommandExitCodes = $script:CommandExitCodes[1..($script:CommandExitCodes.Count - 1)]
+            }
+            if ($next -eq 0) {
+                Set-Content -LiteralPath $lastMessagePath -Value "retry recovered"
             }
             return $next
         }
@@ -1078,9 +1265,13 @@ Describe "Invoke-CodexAutopilot" {
 
         $exitCode | Should Be 0
         Assert-MockCalled Invoke-CodexCommand -Times 2
+        $script:RetryAttemptInputs | Should Be @("", "")
         $logText = Read-TextFileUtf8 -Path $logPath
+        $logText | Should Match 'event=last_message_cleared turn=1 attempt=0'
         $logText | Should Match 'event=exec_retry turn=1 attempt=1 max_retries=1 exit_code=12 failure_class=exec_exit_nonzero delay_seconds=0'
+        $logText | Should Match 'event=last_message_cleared turn=1 attempt=1'
         $logText | Should Not Match 'event=stop reason=exec_exit_nonzero'
+        Read-TextFileUtf8 -Path $lastMessagePath | Should Match "retry recovered"
         $logText | Should Match 'event=stop reason=max_turns_reached turn=1 exit_code=0'
     }
 
@@ -1115,6 +1306,31 @@ Describe "Invoke-CodexAutopilot" {
         $state = Get-Content -LiteralPath $runStatePath -Raw | ConvertFrom-Json
         $state.last_exit_code | Should Be 13
         $state.stop_reason | Should Be "exec_retry_exhausted"
+    }
+
+    It "records the last message summary when codex exits non-zero after writing output" {
+        $lastMessagePath = Join-Path $TestDrive "last-message-fail-output.txt"
+        $runStatePath = Join-Path $TestDrive "run-state-fail-output.json"
+        $logPath = Join-Path $TestDrive "autopilot-fail-output.log"
+        Set-Content -LiteralPath $lastMessagePath -Value ""
+        $failureMessage = "partial failure details"
+
+        Mock Get-CodexExecArgumentList { return @("exec") }
+        Mock Invoke-CodexCommand {
+            Set-Content -LiteralPath $lastMessagePath -Value $failureMessage
+            return 12
+        }
+        Mock Start-Sleep {}
+        Mock Set-WindowTitle {}
+
+        $exitCode = Invoke-CodexAutopilot -MaxTurns 1 -SleepSeconds 0 -LastMessageFile $lastMessagePath -ResumePrompt "Continue" -SessionId "ffffffff-ffff-ffff-ffff-ffffffffffff" -LogFile $logPath -RunStateFile $runStatePath
+
+        $exitCode | Should Be 12
+        $state = Get-Content -LiteralPath $runStatePath -Raw | ConvertFrom-Json
+        $expectedMessage = Read-TextFileUtf8 -Path $lastMessagePath
+        $state.last_message_length | Should Be $expectedMessage.Length
+        $state.last_message_sha256 | Should Be (Get-TextSha256 -Text $expectedMessage)
+        Read-TextFileUtf8 -Path $logPath | Should Match 'event=last_message_read turn=1 length='
     }
 
     It "logs codex execution exceptions before rethrowing" {

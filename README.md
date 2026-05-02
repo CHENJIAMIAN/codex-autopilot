@@ -15,6 +15,7 @@ It is built for a simple workflow:
 - Persist run state to `run-state.json` so interrupted runs can continue from the next turn
 - Retry transient non-zero `codex exec` exits without consuming extra turn budget
 - Recover conservatively from long stalled turns when the last message is already stable
+- Isolate the Codex last-message output file per autopilot process
 - Show session working directory in the picker
 - Prefer full session history when `fzf` is available, with fallback to numbered selection
 - Load resume prompt options from `resume-prompts.txt` so prompt changes do not require code edits
@@ -48,6 +49,7 @@ powershell -ExecutionPolicy Bypass -File D:\Desktop\codex-autopilot\codex-autopi
 ```
 
 If you do not pass `-ResumePrompt`, the script opens a prompt picker first.
+If you also do not pass `-MaxTurns`, the script then opens a max-turn picker with `50`, `15`, `10`, `5`, and `3`, defaulting to `50`.
 
 ## Session Picker
 
@@ -76,6 +78,16 @@ Example:
 好,可以,先提交再继续
 ```
 
+## Turn Count Picker
+
+When `-ResumePrompt` is not provided, the interactive flow is:
+
+1. Choose a resume prompt
+2. Choose `MaxTurns`
+
+The built-in turn-count options are `50`, `15`, `10`, `5`, and `3`.
+Passing `-MaxTurns` explicitly skips the turn-count picker.
+
 ## Run State
 
 By default, state is persisted next to the script at:
@@ -101,6 +113,7 @@ The state file records:
 - last assistant-message hash and length
 
 If the previous stop reason was `loop_continue`, the next run resumes from the next turn when session id and working directory still match.
+If `codex exec` exits non-zero after writing output, the state file still records the last-message hash and length for diagnostics.
 
 ## Retry Behavior
 
@@ -111,8 +124,15 @@ powershell -ExecutionPolicy Bypass -File D:\Desktop\codex-autopilot\codex-autopi
 ```
 
 - Retries do not consume additional turn budget
-- Failed retry attempts are logged as `event=exec_retry`
+- Each attempt starts by clearing the turn's last-message output file, so stale output from earlier turns or attempts is not reused
+- Attempt-scoped logs include `attempt`, for example `event=last_message_cleared turn=1 attempt=0` and `event=exec_retry turn=1 attempt=1`
 - If retries are exhausted, the run ends with `stop_reason=exec_retry_exhausted`
+
+By default the last-message output file is process-scoped, for example:
+
+```text
+%TEMP%\codex_last_msg_<PID>.txt
+```
 
 ## Execution Modes
 

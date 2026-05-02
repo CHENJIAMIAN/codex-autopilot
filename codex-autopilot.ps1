@@ -3,7 +3,7 @@ param(
     [int]$SleepSeconds = 3,
     [int]$RetryCount = 0,
     [int]$RetryDelaySeconds = 5,
-    [string]$LastMessageFile = (Join-Path $env:TEMP "codex_last_msg.txt"),
+    [string]$LastMessageFile = (Join-Path $env:TEMP ("codex_last_msg_{0}.txt" -f $PID)),
     [string]$LogFile = (Join-Path $PSScriptRoot "codex-autopilot.log"),
     [int]$TurnStallTimeoutSeconds = 1800,
     [int]$LastMessageStableSeconds = 30,
@@ -26,11 +26,15 @@ $script:Ui = ConvertFrom-Json @'
   "ResumePromptShort": "继续",
   "ResumePromptOkay": "好,可以,继续",
   "SelectPromptPrompt": "选择提示语: ",
+  "SelectMaxTurnsPrompt": "选择轮次数: ",
   "NoPromptSelected": "未选择任何提示语。",
+  "NoMaxTurnsSelected": "未选择任何轮次数。",
   "PromptHelp": "使用上/下方向键选择，回车确认。",
+  "MaxTurnsHelp": "使用上/下方向键选择，回车确认。",
   "PromptLabelDefault": "详细提示语",
   "PromptLabelShort": "简短提示语：继续",
   "PromptLabelOkay": "简短提示语：好,可以,继续",
+  "MaxTurnsLabelDefault": "50（默认）",
   "NoSessionsFound": "未找到 Codex 会话。",
   "NoSessionSelected": "未选择任何会话。",
   "NoSessionWorkingDirectory": "选中的会话没有记录工作目录。",
@@ -119,7 +123,7 @@ function Read-TextFileUtf8 {
 function Write-TextFileUtf8Atomic {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $true)][string]$Text
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Text
     )
 
     $directory = Split-Path -Path $Path -Parent
@@ -164,6 +168,42 @@ function Write-AutopilotLog {
 
     $line = "{0} {1}" -f ([DateTimeOffset]::Now.ToString("o")), $Message
     [System.IO.File]::AppendAllText($Path, $line + [Environment]::NewLine, $script:Utf8Encoding)
+}
+
+function Clear-LastMessageFile {
+    param(
+        [string]$Path,
+        [int]$Turn = 0,
+        [int]$Attempt = 0,
+        [string]$LogFile
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return
+    }
+
+    Write-TextFileUtf8Atomic -Path $Path -Text ""
+    if (-not [string]::IsNullOrWhiteSpace($LogFile) -and $Turn -gt 0) {
+        Write-AutopilotLog -Path $LogFile -Message ("event=last_message_cleared turn={0} attempt={1}" -f $Turn, $Attempt)
+    }
+}
+
+function Read-LastMessageFile {
+    param(
+        [string]$Path,
+        [int]$Turn = 0,
+        [string]$LogFile
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path)) {
+        return ""
+    }
+
+    $lastMessage = Read-TextFileUtf8 -Path $Path
+    if (-not [string]::IsNullOrWhiteSpace($LogFile) -and $Turn -gt 0) {
+        Write-AutopilotLog -Path $LogFile -Message ("event=last_message_read turn={0} length={1}" -f $Turn, $lastMessage.Length)
+    }
+    return $lastMessage
 }
 
 function Get-TextSha256 {
@@ -536,7 +576,6 @@ function Get-CodexExecArgumentList {
 
 function Select-ResumePrompt {
     $options = @(Get-ResumePromptOptions -PromptsFile $ResumePromptsFile)
-    $defaultOptions = @(Get-DefaultResumePromptOptions)
 
     $entries = @()
     for ($i = 0; $i -lt $options.Count; $i++) {
@@ -576,6 +615,75 @@ function Select-ResumePrompt {
                 throw $script:Ui.NoPromptSelected
             }
         }
+    }
+}
+
+function Get-DefaultMaxTurnOptions {
+    return @(50, 15, 10, 5, 3)
+}
+
+function Select-MaxTurns {
+    $options = @(Get-DefaultMaxTurnOptions)
+
+    $entries = @()
+    for ($i = 0; $i -lt $options.Count; $i++) {
+        $value = [int]$options[$i]
+        $label = if ($value -eq 50) {
+            $script:Ui.MaxTurnsLabelDefault
+        }
+        else {
+            [string]$value
+        }
+
+        $entries += [PSCustomObject]@{
+            Key = "MaxTurns{0}" -f $i
+            Label = $label
+            Value = $value
+        }
+    }
+
+    $selectedIndex = 0
+    Write-MenuOptions -Entries $entries -SelectedIndex $selectedIndex -Prompt $script:Ui.SelectMaxTurnsPrompt -HelpText $script:Ui.MaxTurnsHelp
+
+    while ($true) {
+        $keyInfo = Get-ConsoleKeyInfo
+        switch ($keyInfo.VirtualKeyCode) {
+            38 {
+                $selectedIndex = ($selectedIndex - 1 + $entries.Count) % $entries.Count
+                Write-MenuOptions -Entries $entries -SelectedIndex $selectedIndex -Prompt $script:Ui.SelectMaxTurnsPrompt -HelpText $script:Ui.MaxTurnsHelp
+            }
+            40 {
+                $selectedIndex = ($selectedIndex + 1) % $entries.Count
+                Write-MenuOptions -Entries $entries -SelectedIndex $selectedIndex -Prompt $script:Ui.SelectMaxTurnsPrompt -HelpText $script:Ui.MaxTurnsHelp
+            }
+            13 {
+                return [int]$entries[$selectedIndex].Value
+            }
+            27 {
+                throw $script:Ui.NoMaxTurnsSelected
+            }
+        }
+    }
+}
+
+function Resolve-InteractiveRunOptions {
+    param(
+        [string]$ResumePrompt,
+        [int]$MaxTurns,
+        [bool]$HasResumePrompt,
+        [bool]$HasMaxTurns
+    )
+
+    if (-not $HasResumePrompt) {
+        $ResumePrompt = Select-ResumePrompt
+        if (-not $HasMaxTurns) {
+            $MaxTurns = Select-MaxTurns
+        }
+    }
+
+    return [PSCustomObject]@{
+        ResumePrompt = $ResumePrompt
+        MaxTurns = $MaxTurns
     }
 }
 
@@ -1109,10 +1217,12 @@ function Invoke-CodexAutopilot {
         Write-Host (Get-TurnBanner -Turn $turn -MaxTurns $MaxTurns -Phase "Begin") -ForegroundColor Cyan
 
         $args = Get-CodexExecArgumentList -LastMessageFile $LastMessageFile -ResumePrompt $ResumePrompt -SessionId $SessionId -CodexExecutionMode $CodexExecutionMode -CodexSandboxMode $CodexSandboxMode -CodexProfile $CodexProfile
-        Write-AutopilotLog -Path $LogFile -Message ("event=exec_invoke turn={0} command={1}" -f $turn, ((Get-CodexExecutablePath), ($args -join ' ') -join ' '))
         $runningTitle = Get-WindowTitle -Phase "Running" -Turn $turn -MaxTurns $MaxTurns
         $attempt = 0
         do {
+            Clear-LastMessageFile -Path $LastMessageFile -Turn $turn -Attempt $attempt -LogFile $LogFile
+            $commandForLog = ConvertTo-ProcessArgumentString -ArgumentList (@((Get-CodexExecutablePath)) + $args)
+            Write-AutopilotLog -Path $LogFile -Message ("event=exec_invoke turn={0} attempt={1} command={2}" -f $turn, $attempt, $commandForLog)
             if ($WorkingDirectory) {
                 Push-Location -LiteralPath $WorkingDirectory
                 try {
@@ -1165,17 +1275,16 @@ function Invoke-CodexAutopilot {
 
         if ($exitCode -ne 0) {
             $stopReason = if ($RetryCount -gt 0) { "exec_retry_exhausted" } else { "exec_exit_nonzero" }
+            $lastMessage = Read-LastMessageFile -Path $LastMessageFile -Turn $turn -LogFile $LogFile
             Set-WindowTitle -Title (Get-WindowTitle -Phase "Failed" -ExitCode $exitCode)
             Write-AutopilotLog -Path $LogFile -Message ("event=stop reason={0} turn={1} exit_code={2}" -f $stopReason, $turn, $exitCode)
-            Write-AutopilotRunState -Path $RunStateFile -Turn $turn -MaxTurns $MaxTurns -LastExitCode $exitCode -StopReason $stopReason -SessionId $SessionId -WorkingDirectory $WorkingDirectory -LastMessage "" -StallRecovered $stallRecovered
+            Write-AutopilotRunState -Path $RunStateFile -Turn $turn -MaxTurns $MaxTurns -LastExitCode $exitCode -StopReason $stopReason -SessionId $SessionId -WorkingDirectory $WorkingDirectory -LastMessage $lastMessage -StallRecovered $stallRecovered
             Write-Host ($script:Ui.ExecExitCode -f $exitCode) -ForegroundColor Yellow
             return $exitCode
         }
 
-        $lastMessage = ""
-        if (Test-Path -LiteralPath $LastMessageFile) {
-            $lastMessage = Read-TextFileUtf8 -Path $LastMessageFile
-            Write-AutopilotLog -Path $LogFile -Message ("event=last_message_read turn={0} length={1}" -f $turn, $lastMessage.Length)
+        $lastMessage = Read-LastMessageFile -Path $LastMessageFile -Turn $turn -LogFile $LogFile
+        if (-not [string]::IsNullOrWhiteSpace($lastMessage)) {
             Write-Host ""
             Write-Host $script:Ui.LastMessageHeader -ForegroundColor DarkCyan
             Write-Host $lastMessage.TrimEnd()
@@ -1204,9 +1313,9 @@ function Invoke-CodexAutopilot {
 if ($env:CODEX_AUTOPILOT_IMPORT_ONLY -ne "1") {
     Initialize-ConsoleUtf8
     $sessionContext = Resolve-SessionContext -SessionId $SessionId -SessionsDir $SessionsDir -SessionLimit $SessionLimit
-    if (-not $PSBoundParameters.ContainsKey("ResumePrompt")) {
-        $ResumePrompt = Select-ResumePrompt
-    }
+    $runOptions = Resolve-InteractiveRunOptions -ResumePrompt $ResumePrompt -MaxTurns $MaxTurns -HasResumePrompt $PSBoundParameters.ContainsKey("ResumePrompt") -HasMaxTurns $PSBoundParameters.ContainsKey("MaxTurns")
+    $ResumePrompt = $runOptions.ResumePrompt
+    $MaxTurns = [int]$runOptions.MaxTurns
     $exitCode = Invoke-CodexAutopilot -MaxTurns $MaxTurns -SleepSeconds $SleepSeconds -RetryCount $RetryCount -RetryDelaySeconds $RetryDelaySeconds -LastMessageFile $LastMessageFile -LogFile $LogFile -TurnStallTimeoutSeconds $TurnStallTimeoutSeconds -LastMessageStableSeconds $LastMessageStableSeconds -ResumePrompt $ResumePrompt -SessionId $sessionContext.SessionId -WorkingDirectory $sessionContext.WorkingDirectory -RunStateFile $RunStateFile -CodexExecutionMode $CodexExecutionMode -CodexSandboxMode $CodexSandboxMode -CodexProfile $CodexProfile
     exit $exitCode
 }
