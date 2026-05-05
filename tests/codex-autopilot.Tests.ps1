@@ -1453,7 +1453,7 @@ Describe "Invoke-CodexAutopilot" {
         $logText | Should Match 'event=turn_start turn=3'
     }
 
-    It "does not resume a run state that already reached max turns" {
+    It "starts a fresh run when the previous run state already reached max turns" {
         $lastMessagePath = Join-Path $TestDrive "last-message-completed-state.txt"
         $runStatePath = Join-Path $TestDrive "run-state-completed.json"
         $logPath = Join-Path $TestDrive "autopilot-completed-state.log"
@@ -1468,17 +1468,21 @@ Describe "Invoke-CodexAutopilot" {
         } | ConvertTo-Json | Set-Content -LiteralPath $runStatePath
 
         Mock Get-CodexExecArgumentList { return @("exec") }
-        Mock Invoke-CodexCommand { throw "should not execute codex when run state is complete" }
+        Mock Invoke-CodexCommand { return 0 }
         Mock Start-Sleep {}
         Mock Set-WindowTitle {}
 
         $exitCode = Invoke-CodexAutopilot -MaxTurns 3 -SleepSeconds 0 -LastMessageFile $lastMessagePath -ResumePrompt "Continue" -SessionId "ffffffff-ffff-ffff-ffff-ffffffffffff" -LogFile $logPath -RunStateFile $runStatePath
 
         $exitCode | Should Be 0
-        (Read-TextFileUtf8 -Path $logPath) | Should Match 'event=run_state_complete turn=3 max_turns=3'
+        Assert-MockCalled Invoke-CodexCommand -Times 3
+        $logText = Read-TextFileUtf8 -Path $logPath
+        $logText | Should Match 'event=run_state_ignored reason=max_turns_reached turn=3 exit_code=0'
+        $logText | Should Match 'event=turn_start turn=1'
+        $logText | Should Match 'event=turn_start turn=3'
     }
 
-    It "resumes a completed run state when max turns is increased" {
+    It "starts a fresh run when max turns is increased after a completed run state" {
         $lastMessagePath = Join-Path $TestDrive "last-message-completed-extended.txt"
         $runStatePath = Join-Path $TestDrive "run-state-completed-extended.json"
         $logPath = Join-Path $TestDrive "autopilot-completed-extended.log"
@@ -1500,10 +1504,10 @@ Describe "Invoke-CodexAutopilot" {
         $exitCode = Invoke-CodexAutopilot -MaxTurns 5 -SleepSeconds 0 -LastMessageFile $lastMessagePath -ResumePrompt "Continue" -SessionId "ffffffff-ffff-ffff-ffff-ffffffffffff" -LogFile $logPath -RunStateFile $runStatePath
 
         $exitCode | Should Be 0
-        Assert-MockCalled Invoke-CodexCommand -Times 2
+        Assert-MockCalled Invoke-CodexCommand -Times 5
         $logText = Read-TextFileUtf8 -Path $logPath
-        $logText | Should Match 'event=run_state_restored turn=3 next_turn=4 reason=max_turns_extended'
-        $logText | Should Match 'event=turn_start turn=4'
+        $logText | Should Match 'event=run_state_ignored reason=max_turns_reached turn=3 exit_code=0'
+        $logText | Should Match 'event=turn_start turn=1'
         $logText | Should Match 'event=turn_start turn=5'
     }
 

@@ -351,21 +351,6 @@ function Get-AutopilotResumeTurn {
         return 0
     }
 
-    if ($stateStopReason -eq "max_turns_reached") {
-        if ($stateTurn -ge $MaxTurns) {
-            Write-AutopilotLog -Path $LogFile -Message ("event=run_state_complete turn={0} max_turns={1}" -f $stateTurn, $MaxTurns)
-            return $MaxTurns
-        }
-
-        if ($stateExitCode -eq 0) {
-            Write-AutopilotLog -Path $LogFile -Message ("event=run_state_restored turn={0} next_turn={1} reason=max_turns_extended" -f $stateTurn, ($stateTurn + 1))
-            return $stateTurn
-        }
-
-        Write-AutopilotLog -Path $LogFile -Message ("event=run_state_ignored reason=max_turns_reached_nonzero turn={0} exit_code={1}" -f $stateTurn, $stateExitCode)
-        return 0
-    }
-
     if ($stateStopReason -ne "loop_continue" -or $stateExitCode -ne 0) {
         Write-AutopilotLog -Path $LogFile -Message ("event=run_state_ignored reason={0} turn={1} exit_code={2}" -f $(if ($stateStopReason) { $stateStopReason } else { "unknown" }), $stateTurn, $stateExitCode)
         return 0

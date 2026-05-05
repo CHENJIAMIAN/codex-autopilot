@@ -113,6 +113,7 @@ The state file records:
 - last assistant-message hash and length
 
 If the previous stop reason was `loop_continue`, the next run resumes from the next turn when session id and working directory still match.
+A run state that already ended with `max_turns_reached` is treated as completed history, so the next launch starts a fresh turn budget from turn 1.
 If `codex exec` exits non-zero after writing output, the state file still records the last-message hash and length for diagnostics.
 
 ## Retry Behavior
