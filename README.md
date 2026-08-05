@@ -1,3 +1,11 @@
+[English](./README.en.md)
+
+<!-- codex-github-rules:bilingual-summary -->
+> **中文简介**：在 Windows 上逐轮恢复并推进 Codex CLI 会话的自动驾驶封装
+>
+> **English summary**: A Windows autopilot wrapper that resumes and advances Codex CLI sessions turn by turn
+
+---
 # codex-autopilot
 
 Windows autopilot wrapper for continuing existing Codex sessions turn by turn.
